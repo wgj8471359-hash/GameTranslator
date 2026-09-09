@@ -29,7 +29,9 @@ class OverlayManager(private val context: Context) {
         val minTextLength: Int = 2,
         val bubbleAlphaPercent: Int = 85,
         val minFontSp: Int = 8,
-        val maxFontSp: Int = 16
+        val maxFontSp: Int = 16,
+        val sourceImageWidth: Int = 0,
+        val sourceImageHeight: Int = 0
     )
 
     private var rootOverlayView: FrameLayout? = null
@@ -38,12 +40,7 @@ class OverlayManager(private val context: Context) {
     /**
      * 展现翻译气泡全屏覆盖层
      * @param clusters 待展示的聚类文本与译文列表
-     * @param config 样式与过滤配置（透明度、字号自适应范围、最小字数）
-     */
-    /**
-     * 展现翻译气泡全屏覆盖层
-     * @param clusters 待展示的聚类文本与译文列表
-     * @param config 样式与过滤配置（透明度、字号自适应范围、最小字数）
+     * @param config 样式与过滤配置（透明度、字号自适应范围、最小字数、截屏源图尺寸）
      */
     @SuppressLint("ClickableViewAccessibility")
     fun showOverlay(clusters: List<ClusteredText>, config: OverlayConfig = OverlayConfig()) {
@@ -68,7 +65,7 @@ class OverlayManager(private val context: Context) {
 
             // WindowManager 参数配置：
             // FLAG_NOT_FOCUSABLE or FLAG_LAYOUT_NO_LIMITS or FLAG_LAYOUT_IN_SCREEN
-            // 确保全屏刘海屏物理坐标 1:1 吻合
+            // 确保全屏刘海屏物理坐标 1:1 吻合，并强制定位在左上角对齐
             val layoutParams = WindowManager.LayoutParams().apply {
                 width = WindowManager.LayoutParams.MATCH_PARENT
                 height = WindowManager.LayoutParams.MATCH_PARENT
@@ -81,6 +78,7 @@ class OverlayManager(private val context: Context) {
                         WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
                         WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                 format = PixelFormat.TRANSLUCENT
+                gravity = Gravity.TOP or Gravity.START
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                     layoutInDisplayCutoutMode =
@@ -88,9 +86,26 @@ class OverlayManager(private val context: Context) {
                 }
             }
 
-            val realDm = DisplayMetrics()
             val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
             val defaultDisplay = displayManager?.getDisplay(Display.DEFAULT_DISPLAY)
+            val rotation = defaultDisplay?.rotation ?: android.view.Surface.ROTATION_0
+            val isLandscape = rotation == android.view.Surface.ROTATION_90 ||
+                    rotation == android.view.Surface.ROTATION_270 ||
+                    context.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+
+            var rawWidth = 0
+            var rawHeight = 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    val bounds = windowManager.maximumWindowMetrics.bounds
+                    if (bounds.width() > 0 && bounds.height() > 0) {
+                        rawWidth = bounds.width()
+                        rawHeight = bounds.height()
+                    }
+                } catch (_: Throwable) {}
+            }
+
+            val realDm = DisplayMetrics()
             if (defaultDisplay != null) {
                 @Suppress("DEPRECATION")
                 defaultDisplay.getRealMetrics(realDm)
@@ -98,11 +113,22 @@ class OverlayManager(private val context: Context) {
                 @Suppress("DEPRECATION")
                 windowManager.defaultDisplay.getRealMetrics(realDm)
             }
-            val screenWidth = realDm.widthPixels
-            val screenHeight = realDm.heightPixels
+
+            if (rawWidth <= 0 || rawHeight <= 0) {
+                rawWidth = realDm.widthPixels
+                rawHeight = realDm.heightPixels
+            }
+
+            // 严格保证横屏下长边为宽、短边为高，消除 panel 原生方向倒挂
+            val screenWidth = if (isLandscape) maxOf(rawWidth, rawHeight) else minOf(rawWidth, rawHeight)
+            val screenHeight = if (isLandscape) minOf(rawWidth, rawHeight) else maxOf(rawWidth, rawHeight)
             val density = realDm.density
             val cornerRadiusPx = 6f * density
             val paddingPx = (4f * density).toInt()
+
+            // 动态计算源图与屏幕物理分辨率的映射缩放比（防畸变与错位）
+            val scaleX = if (config.sourceImageWidth > 0) screenWidth.toFloat() / config.sourceImageWidth else 1.0f
+            val scaleY = if (config.sourceImageHeight > 0) screenHeight.toFloat() / config.sourceImageHeight else 1.0f
 
             // 计算气泡动态透明度与颜色（默认 85% -> ARGB: D9, 1E, 1E, 24）
             val alphaInt = ((config.bubbleAlphaPercent.coerceIn(20, 100) / 100f) * 255).toInt()
@@ -113,14 +139,16 @@ class OverlayManager(private val context: Context) {
 
             for (item in validClusters) {
                 val box = item.boundingBox
-                val rawWidth = box.width().coerceAtLeast((30 * density).toInt())
-                val rawHeight = box.height().coerceAtLeast((20 * density).toInt())
+                val scaledLeft = (box.left * scaleX).toInt()
+                val scaledTop = (box.top * scaleY).toInt()
+                val scaledWidth = (box.width() * scaleX).toInt().coerceAtLeast((30 * density).toInt())
+                val scaledHeight = (box.height() * scaleY).toInt().coerceAtLeast((20 * density).toInt())
 
                 // 边界安全防护：防止气泡超出物理屏幕范围
-                val left = box.left.coerceIn(0, (screenWidth - (30 * density).toInt()).coerceAtLeast(0))
-                val top = box.top.coerceIn(0, (screenHeight - (20 * density).toInt()).coerceAtLeast(0))
-                val width = rawWidth.coerceAtMost(screenWidth - left)
-                val height = rawHeight.coerceAtMost(screenHeight - top)
+                val left = scaledLeft.coerceIn(0, (screenWidth - (30 * density).toInt()).coerceAtLeast(0))
+                val top = scaledTop.coerceIn(0, (screenHeight - (20 * density).toInt()).coerceAtLeast(0))
+                val width = scaledWidth.coerceAtMost(screenWidth - left)
+                val height = scaledHeight.coerceAtMost(screenHeight - top)
 
                 val bubbleView = TextView(context).apply {
                     // 半透明深色圆角矩形（动态透明度，圆角 6dp）
@@ -158,6 +186,7 @@ class OverlayManager(private val context: Context) {
                 }
 
                 val childParams = FrameLayout.LayoutParams(width, height).apply {
+                    gravity = Gravity.TOP or Gravity.START
                     leftMargin = left
                     topMargin = top
                 }

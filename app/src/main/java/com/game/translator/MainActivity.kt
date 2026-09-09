@@ -187,10 +187,18 @@ class MainActivity : AppCompatActivity() {
 
         btnStartService.setOnClickListener {
             saveConfig()
+            if (TranslatorService.isRunning) {
+                Toast.makeText(this, R.string.toast_service_already_running, Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
             checkPermissionsAndStart()
         }
 
         btnStopService.setOnClickListener {
+            if (!TranslatorService.isRunning) {
+                Toast.makeText(this, R.string.toast_service_not_running, Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
             val stopIntent = Intent(this, TranslatorService::class.java).apply {
                 action = TranslatorService.ACTION_STOP_SERVICE
             }

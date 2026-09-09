@@ -49,13 +49,15 @@
     <string name="btn_save_config">保存配置</string>
     <string name="btn_reset_recommend">恢复官方推荐参数与提示词</string>
     
-    <string name="tip_usage">操作指引：\n• 单击悬浮球：静默截屏并翻译（松手自动贴边隐藏半边）\n• 双击悬浮球：快速返回本配置页\n• 点击气泡：在原文与译文之间切换\n• 点击任意空白区域：关闭所有气泡</string>
+    <string name="tip_usage">操作指引：\n• 单击悬浮球：静默截屏并翻译\n• 双击悬浮球：快速返回本配置页\n• 自由拖动：悬浮球可随意停留在屏幕任意位置\n• 点击气泡：在原文与译文之间切换\n• 点击任意空白区域：关闭所有气泡</string>
     <string name="toast_config_saved">配置已保存</string>
     <string name="toast_reset_recommend">已恢复混元官方推荐参数与提示词</string>
     <string name="toast_translating">正在识别翻译中...</string>
     <string name="toast_overlay_permission_required">请授予悬浮窗显示权限</string>
     <string name="toast_service_started">翻译服务已启动</string>
     <string name="toast_service_stopped">翻译服务已停止</string>
+    <string name="toast_service_not_running">翻译悬浮球未运行，无需停止</string>
+    <string name="toast_service_already_running">翻译悬浮球已在运行中</string>
     <string name="toast_capture_failed">截屏捕获失败</string>
     <string name="toast_no_text_detected">未识别到有效文字</string>
     <string name="toast_translation_failed">翻译请求失败：%s</string>

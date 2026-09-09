@@ -9,6 +9,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
@@ -25,6 +26,7 @@ import android.util.DisplayMetrics
 import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.Surface
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
@@ -54,6 +56,10 @@ class TranslatorService : Service() {
 
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "translator_service_channel"
+
+        @Volatile
+        var isRunning: Boolean = false
+            private set
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -89,6 +95,7 @@ class TranslatorService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        isRunning = true
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
@@ -175,11 +182,32 @@ class TranslatorService : Service() {
     private data class ScreenMetrics(val width: Int, val height: Int, val densityDpi: Int)
 
     /**
-     * 动态获取当前物理硬件真实屏幕尺寸（严格保证横竖屏 1:1 精确映射）
+     * 动态获取当前物理硬件真实屏幕尺寸（严格结合硬件旋转角，保证横竖屏 1:1 精确长宽映射）
      */
     private fun getCurrentScreenMetrics(): ScreenMetrics {
         val displayManager = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
         val defaultDisplay = displayManager?.getDisplay(Display.DEFAULT_DISPLAY)
+        val rotation = defaultDisplay?.rotation ?: Surface.ROTATION_0
+        val isLandscape = rotation == Surface.ROTATION_90 ||
+                rotation == Surface.ROTATION_270 ||
+                resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+        var rawWidth = 0
+        var rawHeight = 0
+
+        // 优先尝试 Android 30+ WindowMetrics
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val bounds = windowManager.maximumWindowMetrics.bounds
+                if (bounds.width() > 0 && bounds.height() > 0) {
+                    rawWidth = bounds.width()
+                    rawHeight = bounds.height()
+                }
+            } catch (e: Exception) {
+                // 忽略
+            }
+        }
+
         val dm = DisplayMetrics()
         if (defaultDisplay != null) {
             @Suppress("DEPRECATION")
@@ -188,11 +216,32 @@ class TranslatorService : Service() {
             @Suppress("DEPRECATION")
             windowManager.defaultDisplay.getRealMetrics(dm)
         }
+
+        if (rawWidth <= 0 || rawHeight <= 0) {
+            rawWidth = dm.widthPixels
+            rawHeight = dm.heightPixels
+        }
+        val densityDpi = if (dm.densityDpi > 0) dm.densityDpi else resources.configuration.densityDpi
+
+        // 【核心数学与旋转保证】：手机硬件面板以长边为自然高，但旋转 90/270 度切入横屏游戏时，
+        // 逻辑宽度必然是长边，高度必然是短边；竖屏时宽度必然为短边，高度为长边。
+        // 消除底层 panel 物理长宽倒挂导致的 1080px 截断与缩放问题！
+        val finalWidth = if (isLandscape) maxOf(rawWidth, rawHeight) else minOf(rawWidth, rawHeight)
+        val finalHeight = if (isLandscape) minOf(rawWidth, rawHeight) else maxOf(rawWidth, rawHeight)
+
         return ScreenMetrics(
-            width = dm.widthPixels,
-            height = dm.heightPixels,
-            densityDpi = dm.densityDpi
+            width = finalWidth,
+            height = finalHeight,
+            densityDpi = densityDpi
         )
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        mainHandler.post {
+            checkAndResizeCaptureSession()
+            updateFloatingBallForOrientation()
+        }
     }
 
     /**
@@ -226,7 +275,7 @@ class TranslatorService : Service() {
     }
 
     /**
-     * 屏幕旋转时同步校准悬浮球坐标，防止被挤出屏幕
+     * 屏幕旋转时同步校准悬浮球坐标，仅限制在可视屏幕范围内，完全保留用户指定位置，绝不强制贴边与回弹
      */
     private fun updateFloatingBallForOrientation() {
         val ballView = floatingBallView ?: return
@@ -234,13 +283,10 @@ class TranslatorService : Service() {
         val metrics = getCurrentScreenMetrics()
         val ballSize = params.width
 
-        // 确保 Y 坐标在屏幕范围内
+        // 仅在超出新屏幕范围时修正，绝对不强制吸附或隐藏半边
+        params.x = params.x.coerceIn(0, (metrics.width - ballSize).coerceAtLeast(0))
         params.y = params.y.coerceIn(0, (metrics.height - ballSize).coerceAtLeast(0))
-
-        // 贴靠最近边缘并保持半隐
-        val isLeftDocked = params.x + ballSize / 2 < metrics.width / 2
-        params.x = if (isLeftDocked) -ballSize / 2 else metrics.width - ballSize / 2
-        ballView.alpha = 0.45f
+        ballView.alpha = 0.85f
 
         try {
             windowManager.updateViewLayout(ballView, params)
@@ -295,7 +341,7 @@ class TranslatorService : Service() {
     /**
      * 检查屏幕旋转或分辨率变更（例如切入横屏游戏），动态调整 VirtualDisplay 尺寸而无需重建
      */
-    private fun checkAndResizeCaptureSession() {
+    private fun checkAndResizeCaptureSession(): Boolean {
         val metrics = getCurrentScreenMetrics()
         if (metrics.width != currentWidth || metrics.height != currentHeight || metrics.densityDpi != currentDpi) {
             currentWidth = metrics.width
@@ -310,7 +356,9 @@ class TranslatorService : Service() {
             virtualDisplay?.setSurface(newReader.surface)
 
             oldReader?.close()
+            return true
         }
+        return false
     }
 
     /**
@@ -342,7 +390,7 @@ class TranslatorService : Service() {
     }
 
     /**
-     * 初始化半透明悬浮球（支持大小自定义与松手贴边 50% 半隐藏）
+     * 初始化半透明悬浮球（支持大小自定义与自由拖拽放置，取消贴边隐藏）
      */
     @SuppressLint("ClickableViewAccessibility")
     private fun initFloatingBall() {
@@ -366,8 +414,8 @@ class TranslatorService : Service() {
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
             format = PixelFormat.TRANSLUCENT
             gravity = Gravity.TOP or Gravity.START
-            // 初始吸附在屏幕右侧边缘并隐藏半边 (50%)
-            x = screenMetrics.width - ballSize / 2
+            // 初始放置在屏幕右侧并留出 16dp 边距，完全在可视屏幕内，绝不半隐藏
+            x = (screenMetrics.width - ballSize - (16 * density).toInt()).coerceAtLeast(0)
             y = screenMetrics.height / 3
         }
         floatingBallParams = params
@@ -377,7 +425,7 @@ class TranslatorService : Service() {
             setImageResource(R.drawable.ic_translate)
             val iconPadding = (ballSizeDp * 0.22f * density).toInt().coerceAtLeast((6 * density).toInt())
             setPadding(iconPadding, iconPadding, iconPadding, iconPadding)
-            alpha = 0.45f // 贴边未操作时半透明
+            alpha = 0.85f // 始终保持舒适可见度，取消贴边半隐藏变暗
         }
 
         val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
@@ -406,8 +454,10 @@ class TranslatorService : Service() {
                         if (abs(dx) > touchSlop || abs(dy) > touchSlop) {
                             isDragging = true
                         }
-                        params.x = (initialX + dx).toInt()
-                        params.y = (initialY + dy).toInt()
+                        val screenMetrics = getCurrentScreenMetrics()
+                        // 允许平滑拖拽至当前屏幕的任何位置，实时边界防护防止移出视野
+                        params.x = (initialX + dx).toInt().coerceIn(0, (screenMetrics.width - ballSize).coerceAtLeast(0))
+                        params.y = (initialY + dy).toInt().coerceIn(0, (screenMetrics.height - ballSize).coerceAtLeast(0))
                         windowManager.updateViewLayout(ballView, params)
                         return true
                     }
@@ -417,23 +467,18 @@ class TranslatorService : Service() {
                         val screenHeight = screenMetrics.height
 
                         if (!isDragging) {
-                            // 单击事件：短暂保持高亮触发翻译，随后恢复半透明
+                            // 单击事件：短暂保持高亮触发翻译，随后恢复
                             ballView.alpha = 1.0f
                             handleFloatingBallClick()
                             mainHandler.postDelayed({
-                                ballView.alpha = 0.45f
+                                ballView.alpha = 0.85f
                             }, 1200)
                         } else {
-                            // 松手贴边半隐藏：吸附到左侧或右侧边缘，隐藏 50% 身位
-                            val middleX = screenWidth / 2
-                            params.x = if (params.x + ballSize / 2 < middleX) {
-                                -ballSize / 2
-                            } else {
-                                screenWidth - ballSize / 2
-                            }
-                            // 限制 Y 轴不要超出屏幕上下边界
+                            // 【彻底移除贴边隐藏半边与强制吸附】
+                            // 无论横屏还是竖屏，松手即停留在当前位置，绝不自动弹跳到边缘，也绝不隐藏半边！
+                            params.x = params.x.coerceIn(0, (screenWidth - ballSize).coerceAtLeast(0))
                             params.y = params.y.coerceIn(0, (screenHeight - ballSize).coerceAtLeast(0))
-                            ballView.alpha = 0.45f
+                            ballView.alpha = 0.85f
                             windowManager.updateViewLayout(ballView, params)
                         }
                         return true
@@ -499,7 +544,10 @@ class TranslatorService : Service() {
                 delay(60)
 
                 // 2. 检测横竖屏旋转动态调整分辨率
-                checkAndResizeCaptureSession()
+                val hasResized = checkAndResizeCaptureSession()
+                if (hasResized) {
+                    delay(120) // 给系统合成器足够时间刷新至新尺寸 Surface
+                }
 
                 val bitmap = captureScreen()
                 floatingBallView?.visibility = View.VISIBLE
@@ -530,6 +578,8 @@ class TranslatorService : Service() {
                     horizontalOverlapToleranceDp = horizontalOverlapToleranceDp,
                     density = density
                 )
+                val bmpWidth = bitmap.width
+                val bmpHeight = bitmap.height
                 bitmap.recycle()
 
                 if (clusters.isEmpty()) {
@@ -556,7 +606,9 @@ class TranslatorService : Service() {
                         minTextLength = minTextLength,
                         bubbleAlphaPercent = bubbleAlpha,
                         minFontSp = fontMinSp,
-                        maxFontSp = fontMaxSp
+                        maxFontSp = fontMaxSp,
+                        sourceImageWidth = bmpWidth,
+                        sourceImageHeight = bmpHeight
                     )
                     overlayManager.showOverlay(translatedClusters, overlayConfig)
                 }.onFailure { error ->
@@ -644,6 +696,7 @@ class TranslatorService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        isRunning = false
         pendingSingleClickRunnable?.let { mainHandler.removeCallbacks(it) }
 
         if (floatingBallView != null) {
