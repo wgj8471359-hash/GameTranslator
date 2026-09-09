@@ -214,11 +214,36 @@
                     android:id="@+id/switchStreamMode"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="10dp"
+                    android:layout_marginBottom="4dp"
                     android:text="@string/label_stream_mode"
                     android:textColor="@color/text_primary"
                     android:textSize="14sp"
                     android:checked="true" />
+
+                <RadioGroup
+                    android:id="@+id/rgStreamType"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="10dp"
+                    android:layout_marginStart="8dp">
+
+                    <com.google.android.material.radiobutton.MaterialRadioButton
+                        android:id="@+id/rbStreamFormB"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/label_stream_form_b"
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp"
+                        android:checked="true" />
+
+                    <com.google.android.material.radiobutton.MaterialRadioButton
+                        android:id="@+id/rbStreamFormA"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/label_stream_form_a"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="13sp" />
+                </RadioGroup>
 
                 <!-- System Prompt (多行) -->
                 <com.google.android.material.textfield.TextInputLayout
@@ -275,6 +300,24 @@
                     android:textColor="@color/primary"
                     android:textSize="16sp"
                     android:textStyle="bold" />
+
+                <!-- OCR Language Selector (下拉选择) -->
+                <com.google.android.material.textfield.TextInputLayout
+                    android:id="@+id/tilOcrLanguage"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="10dp"
+                    android:hint="@string/label_ocr_language"
+                    style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox.ExposedDropdownMenu">
+
+                    <AutoCompleteTextView
+                        android:id="@+id/actvOcrLanguage"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="none"
+                        android:textColor="@color/text_primary"
+                        android:textSize="14sp" />
+                </com.google.android.material.textfield.TextInputLayout>
 
                 <!-- Line Gap Ratio & Min Text Length (双列) -->
                 <LinearLayout

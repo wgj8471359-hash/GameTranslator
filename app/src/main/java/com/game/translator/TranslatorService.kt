@@ -569,10 +569,12 @@ class TranslatorService : Service() {
                 val fontMinSp = prefs.getInt(MainActivity.KEY_BUBBLE_FONT_MIN_SP, 8)
                 val fontMaxSp = prefs.getInt(MainActivity.KEY_BUBBLE_FONT_MAX_SP, 16)
                 val density = resources.displayMetrics.density
+                val ocrLanguage = prefs.getString(MainActivity.KEY_OCR_LANGUAGE, OcrHelper.LANG_AUTO) ?: OcrHelper.LANG_AUTO
 
-                // 4. Google ML Kit 本地离线 OCR 识别与并查集几何聚类
+                // 4. Google ML Kit 本地离线 OCR 识别与并查集几何聚类（支持中日韩英全语种）
                 val clusters = ocrHelper.recognizeAndCluster(
                     bitmap = bitmap,
+                    ocrLanguage = ocrLanguage,
                     lineGapRatio = lineGapRatio,
                     minTextLength = minTextLength,
                     horizontalOverlapToleranceDp = horizontalOverlapToleranceDp,
@@ -589,6 +591,7 @@ class TranslatorService : Service() {
 
                 val timeoutSeconds = prefs.getInt(MainActivity.KEY_TIMEOUT_SECONDS, 60)
                 val streamMode = prefs.getBoolean(MainActivity.KEY_STREAM_MODE, true)
+                val streamType = prefs.getString(MainActivity.KEY_STREAM_TYPE, MainActivity.STREAM_TYPE_FORM_B) ?: MainActivity.STREAM_TYPE_FORM_B
 
                 val config = HyMtClient.TranslationConfig(
                     endpointUrl = prefs.getString(MainActivity.KEY_ENDPOINT, getString(R.string.default_endpoint_url)) ?: "",
@@ -600,7 +603,8 @@ class TranslatorService : Service() {
                     maxTokens = prefs.getInt(MainActivity.KEY_MAX_TOKENS, 4096),
                     systemPrompt = prefs.getString(MainActivity.KEY_SYSTEM_PROMPT, getString(R.string.default_system_prompt)) ?: "",
                     timeoutSeconds = timeoutSeconds,
-                    streamMode = streamMode
+                    streamMode = streamMode,
+                    streamType = streamType
                 )
 
                 val overlayConfig = OverlayManager.OverlayConfig(

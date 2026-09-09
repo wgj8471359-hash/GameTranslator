@@ -14,6 +14,11 @@ import java.util.regex.Pattern
 
 class HyMtClient {
 
+    companion object {
+        const val STREAM_TYPE_FORM_B = "form_b"
+        const val STREAM_TYPE_FORM_A = "form_a"
+    }
+
     private val baseClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
@@ -93,7 +98,8 @@ class HyMtClient {
         val maxTokens: Int,
         val systemPrompt: String,
         val timeoutSeconds: Int = 60,
-        val streamMode: Boolean = true
+        val streamMode: Boolean = true,
+        val streamType: String = STREAM_TYPE_FORM_B
     )
 
     private fun buildRequestUrl(baseUrl: String): String {
@@ -122,7 +128,7 @@ class HyMtClient {
     }
 
     /**
-     * 发送结构化单次批量翻译请求
+     * 发送结构化单次全量批量翻译请求（非流式模式）
      */
     suspend fun translate(
         clusters: List<ClusteredText>,
@@ -213,10 +219,7 @@ class HyMtClient {
     }
 
     /**
-     * 发送 SSE 流式翻译请求，并在逐句或增量生成时通过 [onProgress] 回调通知上屏展示。
-     * 若服务端不支持流式或发生异常，将优雅降级到单次全量请求。
-     *
-     * @param onProgress (clusterId, text, isFinished) -> Unit
+     * 流式翻译入口：支持形态 B（逐句独立流式）与形态 A（单请求合并流式）
      */
     suspend fun translateStream(
         clusters: List<ClusteredText>,
@@ -227,7 +230,7 @@ class HyMtClient {
             return@withContext Result.success(clusters)
         }
 
-        // 若用户未开启流式，则直接执行普通单次请求
+        // 若未开启流式，则直接走普通全量请求
         if (!config.streamMode) {
             val res = translate(clusters, config)
             res.onSuccess {
@@ -238,6 +241,129 @@ class HyMtClient {
             return@withContext res
         }
 
+        // 根据用户选定的形态路由
+        if (config.streamType == STREAM_TYPE_FORM_B) {
+            translateStreamFormB(clusters, config, onProgress)
+        } else {
+            translateStreamFormA(clusters, config, onProgress)
+        }
+    }
+
+    /**
+     * 形态 B：逐句独立分批流式翻译（对齐混元官方单句 Prompt，1.8B 小模型极稳，无任何 [id] 标号干扰）
+     */
+    private suspend fun translateStreamFormB(
+        clusters: List<ClusteredText>,
+        config: TranslationConfig,
+        onProgress: (clusterId: Int, partialText: String, isFinished: Boolean) -> Unit
+    ): Result<List<ClusteredText>> = withContext(Dispatchers.IO) {
+        val client = getClient(config.timeoutSeconds)
+        val finalUrl = buildRequestUrl(config.endpointUrl)
+
+        for (item in clusters) {
+            val original = item.originalText.trim()
+            if (original.isEmpty()) continue
+
+            // 混元官方标准单句 Prompt，适用于 1.8B 等各类开源翻译模型
+            val singlePrompt = "将以下文本翻译为中文，注意只需要输出翻译后的结果，不要额外解释：\n$original"
+
+            val requestPayload = ChatCompletionRequest(
+                model = config.modelName,
+                messages = listOf(
+                    ChatMessage(role = "user", content = singlePrompt)
+                ),
+                temperature = config.temperature,
+                topP = config.topP,
+                frequencyPenalty = config.frequencyPenalty,
+                repetitionPenalty = config.frequencyPenalty,
+                maxTokens = config.maxTokens,
+                stream = true
+            )
+
+            val jsonBody = gson.toJson(requestPayload)
+            val requestBuilder = Request.Builder()
+                .url(finalUrl)
+                .post(jsonBody.toRequestBody(jsonMediaType))
+
+            if (!config.apiKey.isNullOrBlank()) {
+                requestBuilder.addHeader("Authorization", "Bearer ${config.apiKey.trim()}")
+            }
+
+            val httpRequest = requestBuilder.build()
+            val textBuffer = StringBuilder()
+
+            try {
+                val response = client.newCall(httpRequest).execute()
+                if (!response.isSuccessful) {
+                    response.close()
+                    item.translatedText = item.originalText
+                    onProgress(item.id, item.originalText, true)
+                    continue
+                }
+
+                val body = response.body
+                if (body != null) {
+                    val source = body.source()
+                    body.use {
+                        while (!source.exhausted()) {
+                            val line = source.readUtf8Line() ?: break
+                            val trimmed = line.trim()
+                            if (trimmed.isEmpty() || trimmed.startsWith(":") || trimmed.startsWith("event:")) continue
+                            if (trimmed == "data: [DONE]" || trimmed == "data:[DONE]") break
+                            if (trimmed.startsWith("data:")) {
+                                val dataJson = trimmed.removePrefix("data:").trim()
+                                if (dataJson.isEmpty()) continue
+                                val chunk = try {
+                                    gson.fromJson(dataJson, ChatStreamChunk::class.java)
+                                } catch (_: Exception) {
+                                    null
+                                }
+                                val deltaContent = chunk?.choices?.firstOrNull()?.delta?.content
+                                if (!deltaContent.isNullOrEmpty()) {
+                                    textBuffer.append(deltaContent)
+                                    var current = textBuffer.toString().trim()
+                                    if (current.startsWith("```")) {
+                                        current = current.replaceFirst(Regex("^```[a-zA-Z0-9_-]*\\R"), "")
+                                    }
+                                    if (current.isNotBlank()) {
+                                        onProgress(item.id, current, false)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                var finalClean = textBuffer.toString().trim()
+                if (finalClean.startsWith("```")) {
+                    finalClean = finalClean
+                        .replaceFirst(Regex("^```[a-zA-Z0-9_-]*\\R"), "")
+                        .replace(Regex("\\R```$"), "")
+                        .trim()
+                }
+
+                val textToDisplay = if (finalClean.isNotBlank()) finalClean else item.originalText
+                item.translatedText = textToDisplay
+                onProgress(item.id, textToDisplay, true)
+
+            } catch (e: Exception) {
+                // 单句发生异常，降级显示原文并标记完成，不阻断后续气泡翻译
+                item.translatedText = item.originalText
+                onProgress(item.id, item.originalText, true)
+            }
+        }
+
+        Result.success(clusters)
+    }
+
+    /**
+     * 形态 A：单请求合并流式翻译（带 [1][2] 编号，单次网络请求）
+     */
+    private suspend fun translateStreamFormA(
+        clusters: List<ClusteredText>,
+        config: TranslationConfig,
+        onProgress: (clusterId: Int, partialText: String, isFinished: Boolean) -> Unit
+    ): Result<List<ClusteredText>> = withContext(Dispatchers.IO) {
         val fullUserPrompt = buildUserPrompt(clusters, config.systemPrompt)
 
         val requestPayload = ChatCompletionRequest(
@@ -270,7 +396,6 @@ class HyMtClient {
         try {
             val response = client.newCall(httpRequest).execute()
             if (!response.isSuccessful) {
-                val errorBody = response.body?.string() ?: ""
                 response.close()
                 // 服务端可能不支持 stream，尝试自动降级到非流式
                 val fallbackRes = translate(clusters, config)
@@ -337,7 +462,6 @@ class HyMtClient {
                                     }
                                 }
                             } else if (clusters.isNotEmpty()) {
-                                // 容错：未检测到 [id] 时，作为第一项单句流式输出
                                 val rawText = cleanText.trim()
                                 if (rawText.isNotBlank()) {
                                     onProgress(clusters[0].id, rawText, false)
@@ -382,7 +506,6 @@ class HyMtClient {
 
             Result.success(clusters)
         } catch (e: Exception) {
-            // 如果流式在开始阶段失败且尚未上报任何完成项，尝试普通请求降级
             try {
                 val fallbackRes = translate(clusters, config)
                 fallbackRes.onSuccess {

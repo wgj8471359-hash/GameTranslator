@@ -5,7 +5,13 @@ import android.graphics.Rect
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.TextRecognizer
+import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
+import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
 import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -21,10 +27,27 @@ data class ClusteredText(
 
 class OcrHelper {
 
-    // 采用 Google ML Kit 离线韩文（兼容英文与数字）文本识别客户端
-    private val recognizer = TextRecognition.getClient(
-        KoreanTextRecognizerOptions.Builder().build()
-    )
+    companion object {
+        const val LANG_AUTO = "auto"
+        const val LANG_KOREAN = "korean"
+        const val LANG_JAPANESE = "japanese"
+        const val LANG_CHINESE = "chinese"
+        const val LANG_LATIN = "latin"
+    }
+
+    // 按需惰性初始化的多语言离线识别引擎（零网络、零审查）
+    private val koreanRecognizer: TextRecognizer by lazy {
+        TextRecognition.getClient(KoreanTextRecognizerOptions.Builder().build())
+    }
+    private val japaneseRecognizer: TextRecognizer by lazy {
+        TextRecognition.getClient(JapaneseTextRecognizerOptions.Builder().build())
+    }
+    private val chineseRecognizer: TextRecognizer by lazy {
+        TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+    }
+    private val latinRecognizer: TextRecognizer by lazy {
+        TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    }
 
     /**
      * 并查集 (Disjoint-Set / Union-Find) 实现
@@ -64,22 +87,8 @@ class OcrHelper {
         }
     }
 
-    /**
-     * 截屏 Bitmap 识别并进行 2D 并查集几何聚类
-     * @param lineGapRatio 垂直行距容差倍率（默认 1.2）
-     * @param minTextLength 最小文本长度过滤阈值（默认 2，过滤杂质噪点）
-     * @param horizontalOverlapToleranceDp 水平投影重叠容差（单位 dp，默认 -20dp）
-     * @param density 屏幕密度比例，用于将 dp 转换为 px
-     */
-    suspend fun recognizeAndCluster(
-        bitmap: Bitmap,
-        lineGapRatio: Float = 1.2f,
-        minTextLength: Int = 2,
-        horizontalOverlapToleranceDp: Float = -20f,
-        density: Float = 1f
-    ): List<ClusteredText> {
-        val inputImage = InputImage.fromBitmap(bitmap, 0)
-        val visionText = suspendCancellableCoroutine<Text> { continuation ->
+    private suspend fun processRecognizer(recognizer: TextRecognizer, inputImage: InputImage): Text {
+        return suspendCancellableCoroutine { continuation ->
             recognizer.process(inputImage)
                 .addOnSuccessListener { text ->
                     if (continuation.isActive) {
@@ -92,19 +101,87 @@ class OcrHelper {
                     }
                 }
         }
+    }
 
-        // 提取所有文字行
-        val validLines = mutableListOf<Text.Line>()
-        for (block in visionText.textBlocks) {
-            for (line in block.lines) {
-                if (line.text.isNotBlank() && line.boundingBox != null) {
-                    validLines.add(line)
+    /**
+     * 截屏 Bitmap 识别并进行 2D 并查集几何聚类
+     * @param ocrLanguage 源语言类型（auto / korean / japanese / chinese / latin）
+     * @param lineGapRatio 垂直行距容差倍率（默认 1.2）
+     * @param minTextLength 最小文本长度过滤阈值（默认 2，过滤杂质噪点）
+     * @param horizontalOverlapToleranceDp 水平投影重叠容差（单位 dp，默认 -20dp）
+     * @param density 屏幕密度比例，用于将 dp 转换为 px
+     */
+    suspend fun recognizeAndCluster(
+        bitmap: Bitmap,
+        ocrLanguage: String = LANG_AUTO,
+        lineGapRatio: Float = 1.2f,
+        minTextLength: Int = 2,
+        horizontalOverlapToleranceDp: Float = -20f,
+        density: Float = 1f
+    ): List<ClusteredText> = coroutineScope {
+        val inputImage = InputImage.fromBitmap(bitmap, 0)
+
+        // 根据用户指定的语言或自动多引擎并发识别
+        val visionTexts: List<Text> = when (ocrLanguage) {
+            LANG_KOREAN -> listOf(processRecognizer(koreanRecognizer, inputImage))
+            LANG_JAPANESE -> listOf(processRecognizer(japaneseRecognizer, inputImage))
+            LANG_CHINESE -> listOf(processRecognizer(chineseRecognizer, inputImage))
+            LANG_LATIN -> listOf(processRecognizer(latinRecognizer, inputImage))
+            else -> {
+                // LANG_AUTO: 日语引擎与韩语引擎并行运行（分别覆盖日汉字/假名与韩文字母，且两者均兼容英文数字）
+                val jpDeferred = async { processRecognizer(japaneseRecognizer, inputImage) }
+                val krDeferred = async { processRecognizer(koreanRecognizer, inputImage) }
+                listOf(jpDeferred.await(), krDeferred.await())
+            }
+        }
+
+        // 提取候选文字行
+        val rawLines = mutableListOf<Text.Line>()
+        for (vt in visionTexts) {
+            for (block in vt.textBlocks) {
+                for (line in block.lines) {
+                    if (line.text.isNotBlank() && line.boundingBox != null) {
+                        rawLines.add(line)
+                    }
                 }
             }
         }
 
+        if (rawLines.isEmpty()) {
+            return@coroutineScope emptyList()
+        }
+
+        // 多引擎结果去重：如果两个识别器命中了重叠区域（IoU 或重叠面积比 > 0.5），保留文本较完整者
+        val validLines = mutableListOf<Text.Line>()
+        for (candidate in rawLines) {
+            val cBox = candidate.boundingBox ?: continue
+            val duplicateIndex = validLines.indexOfFirst { existing ->
+                val eBox = existing.boundingBox ?: return@indexOfFirst false
+                val iLeft = max(cBox.left, eBox.left)
+                val iTop = max(cBox.top, eBox.top)
+                val iRight = min(cBox.right, eBox.right)
+                val iBottom = min(cBox.bottom, eBox.bottom)
+                if (iLeft < iRight && iTop < iBottom) {
+                    val intersectionArea = (iRight - iLeft) * (iBottom - iTop)
+                    val minArea = min(cBox.width() * cBox.height(), eBox.width() * eBox.height())
+                    minArea > 0 && (intersectionArea.toFloat() / minArea) > 0.5f
+                } else {
+                    false
+                }
+            }
+
+            if (duplicateIndex >= 0) {
+                // 若新候选词长度更长（可能包含了完整假名或汉字），替换之
+                if (candidate.text.trim().length > validLines[duplicateIndex].text.trim().length) {
+                    validLines[duplicateIndex] = candidate
+                }
+            } else {
+                validLines.add(candidate)
+            }
+        }
+
         if (validLines.isEmpty()) {
-            return emptyList()
+            return@coroutineScope emptyList()
         }
 
         val n = validLines.size
@@ -188,7 +265,7 @@ class OcrHelper {
         // 最终聚类按屏幕空间自上而下排序，并赋予从 1 开始的编号
         tempClusters.sortWith(compareBy({ it.rect.top }, { it.rect.left }))
 
-        return tempClusters.mapIndexed { index, cluster ->
+        tempClusters.mapIndexed { index, cluster ->
             ClusteredText(
                 id = index + 1,
                 originalText = cluster.text,
@@ -199,6 +276,9 @@ class OcrHelper {
     }
 
     fun release() {
-        recognizer.close()
+        try { koreanRecognizer.close() } catch (_: Throwable) {}
+        try { japaneseRecognizer.close() } catch (_: Throwable) {}
+        try { chineseRecognizer.close() } catch (_: Throwable) {}
+        try { latinRecognizer.close() } catch (_: Throwable) {}
     }
 }

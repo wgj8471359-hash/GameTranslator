@@ -11,11 +11,15 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.widget.ArrayAdapter
+import android.widget.AutoCompleteTextView
+import android.widget.RadioGroup
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.radiobutton.MaterialRadioButton
 import com.google.android.material.switchmaterial.SwitchMaterial
 import com.google.android.material.textfield.TextInputEditText
 
@@ -32,6 +36,10 @@ class MainActivity : AppCompatActivity() {
         const val KEY_MAX_TOKENS = "max_tokens"
         const val KEY_TIMEOUT_SECONDS = "timeout_seconds"
         const val KEY_STREAM_MODE = "stream_mode"
+        const val KEY_STREAM_TYPE = "stream_type"
+        const val STREAM_TYPE_FORM_B = "form_b"
+        const val STREAM_TYPE_FORM_A = "form_a"
+        const val KEY_OCR_LANGUAGE = "ocr_language"
         const val KEY_SYSTEM_PROMPT = "system_prompt"
         const val KEY_LINE_GAP_RATIO = "line_gap_ratio"
         const val KEY_MIN_TEXT_LENGTH = "min_text_length"
@@ -46,6 +54,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val ocrLangOptions by lazy {
+        listOf(
+            getString(R.string.ocr_lang_auto) to OcrHelper.LANG_AUTO,
+            getString(R.string.ocr_lang_japanese) to OcrHelper.LANG_JAPANESE,
+            getString(R.string.ocr_lang_korean) to OcrHelper.LANG_KOREAN,
+            getString(R.string.ocr_lang_chinese) to OcrHelper.LANG_CHINESE,
+            getString(R.string.ocr_lang_latin) to OcrHelper.LANG_LATIN
+        )
+    }
+
     private lateinit var etEndpoint: TextInputEditText
     private lateinit var etApiKey: TextInputEditText
     private lateinit var etModelName: TextInputEditText
@@ -55,6 +73,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var etMaxTokens: TextInputEditText
     private lateinit var etTimeoutSeconds: TextInputEditText
     private lateinit var switchStreamMode: SwitchMaterial
+    private lateinit var rgStreamType: RadioGroup
+    private lateinit var rbStreamFormB: MaterialRadioButton
+    private lateinit var rbStreamFormA: MaterialRadioButton
+    private lateinit var actvOcrLanguage: AutoCompleteTextView
     private lateinit var etSystemPrompt: TextInputEditText
     private lateinit var etBallSize: TextInputEditText
     private lateinit var etLineGapRatio: TextInputEditText
@@ -118,6 +140,10 @@ class MainActivity : AppCompatActivity() {
         etMaxTokens = findViewById(R.id.etMaxTokens)
         etTimeoutSeconds = findViewById(R.id.etTimeoutSeconds)
         switchStreamMode = findViewById(R.id.switchStreamMode)
+        rgStreamType = findViewById(R.id.rgStreamType)
+        rbStreamFormB = findViewById(R.id.rbStreamFormB)
+        rbStreamFormA = findViewById(R.id.rbStreamFormA)
+        actvOcrLanguage = findViewById(R.id.actvOcrLanguage)
         etSystemPrompt = findViewById(R.id.etSystemPrompt)
         etBallSize = findViewById(R.id.etBallSize)
         etLineGapRatio = findViewById(R.id.etLineGapRatio)
@@ -145,6 +171,20 @@ class MainActivity : AppCompatActivity() {
         etMaxTokens.setText(prefs.getInt(KEY_MAX_TOKENS, 4096).toString())
         etTimeoutSeconds.setText(prefs.getInt(KEY_TIMEOUT_SECONDS, 60).toString())
         switchStreamMode.isChecked = prefs.getBoolean(KEY_STREAM_MODE, true)
+        val streamType = prefs.getString(KEY_STREAM_TYPE, STREAM_TYPE_FORM_B)
+        if (streamType == STREAM_TYPE_FORM_A) {
+            rbStreamFormA.isChecked = true
+        } else {
+            rbStreamFormB.isChecked = true
+        }
+        rgStreamType.visibility = if (switchStreamMode.isChecked) View.VISIBLE else View.GONE
+
+        val ocrAdapter = ArrayAdapter(this, android.R.layout.simple_dropdown_item_1line, ocrLangOptions.map { it.first })
+        actvOcrLanguage.setAdapter(ocrAdapter)
+        val savedOcrLang = prefs.getString(KEY_OCR_LANGUAGE, OcrHelper.LANG_AUTO)
+        val selectedOcr = ocrLangOptions.find { it.second == savedOcrLang } ?: ocrLangOptions[0]
+        actvOcrLanguage.setText(selectedOcr.first, false)
+
         etSystemPrompt.setText(prefs.getString(KEY_SYSTEM_PROMPT, getString(R.string.default_system_prompt)))
         etBallSize.setText(prefs.getInt(KEY_BALL_SIZE_DP, 44).toString())
         etLineGapRatio.setText(prefs.getFloat(KEY_LINE_GAP_RATIO, 1.2f).toString())
@@ -167,6 +207,11 @@ class MainActivity : AppCompatActivity() {
             putInt(KEY_MAX_TOKENS, etMaxTokens.text.toString().toIntOrNull() ?: 4096)
             putInt(KEY_TIMEOUT_SECONDS, (etTimeoutSeconds.text.toString().toIntOrNull() ?: 60).coerceIn(5, 600))
             putBoolean(KEY_STREAM_MODE, switchStreamMode.isChecked)
+            val streamType = if (rbStreamFormA.isChecked) STREAM_TYPE_FORM_A else STREAM_TYPE_FORM_B
+            putString(KEY_STREAM_TYPE, streamType)
+            val currentOcrText = actvOcrLanguage.text.toString()
+            val selectedOcrCode = ocrLangOptions.find { it.first == currentOcrText }?.second ?: OcrHelper.LANG_AUTO
+            putString(KEY_OCR_LANGUAGE, selectedOcrCode)
             putString(KEY_SYSTEM_PROMPT, etSystemPrompt.text.toString().trim())
             putInt(KEY_BALL_SIZE_DP, (etBallSize.text.toString().toIntOrNull() ?: 44).coerceIn(32, 72))
             putFloat(KEY_LINE_GAP_RATIO, etLineGapRatio.text.toString().toFloatOrNull() ?: 1.2f)
@@ -181,6 +226,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupListeners() {
+        switchStreamMode.setOnCheckedChangeListener { _, isChecked ->
+            rgStreamType.visibility = if (isChecked) View.VISIBLE else View.GONE
+        }
+
         btnSaveConfig.setOnClickListener {
             saveConfig()
         }
@@ -192,6 +241,9 @@ class MainActivity : AppCompatActivity() {
             etMaxTokens.setText("4096")
             etTimeoutSeconds.setText("60")
             switchStreamMode.isChecked = true
+            rbStreamFormB.isChecked = true
+            rgStreamType.visibility = View.VISIBLE
+            actvOcrLanguage.setText(ocrLangOptions[0].first, false)
             etBallSize.setText("44")
             etSystemPrompt.setText(getString(R.string.default_system_prompt))
             saveConfig()
