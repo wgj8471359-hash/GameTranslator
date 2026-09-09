@@ -9,16 +9,19 @@ import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.text.method.ScrollingMovementMethod
 import android.util.DisplayMetrics
 import android.util.TypedValue
 import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.core.widget.TextViewCompat
+import kotlin.math.abs
 
 class OverlayManager(private val context: Context) {
 
@@ -48,10 +51,19 @@ class OverlayManager(private val context: Context) {
             // 同步清除已有浮层，确保在添加新浮层前彻底完成旧视图卸载
             dismissInternal()
 
-            // 过滤有效气泡（文字长度 >= minTextLength）
+            // 过滤有效气泡：
+            // 1. 文字长度满足设定门槛（默认 >= 2）
+            // 2. 智能剔除译文与原文完全相同的项（例如纯中文角色名/菜单、或已本地化的中文句子、或无需变动的标记），
+            //    避免无意义的黑框遮挡游戏原本正常的中文显示
             val validClusters = clusters.filter {
                 val content = it.translatedText ?: it.originalText
-                content.trim().length >= config.minTextLength && content.isNotBlank()
+                val hasValidLength = content.trim().length >= config.minTextLength && content.isNotBlank()
+                val isTextChanged = if (it.translatedText != null) {
+                    !it.translatedText!!.trim().equals(it.originalText.trim(), ignoreCase = true)
+                } else {
+                    true
+                }
+                hasValidLength && isTextChanged
             }
 
             if (validClusters.isEmpty()) return@Runnable
@@ -124,7 +136,8 @@ class OverlayManager(private val context: Context) {
             val screenHeight = if (isLandscape) minOf(rawWidth, rawHeight) else maxOf(rawWidth, rawHeight)
             val density = realDm.density
             val cornerRadiusPx = 6f * density
-            val paddingPx = (4f * density).toInt()
+            val paddingH = (5f * density).toInt()
+            val paddingV = (2.5f * density).toInt()
 
             // 动态计算源图与屏幕物理分辨率的映射缩放比（防畸变与错位）
             val scaleX = if (config.sourceImageWidth > 0) screenWidth.toFloat() / config.sourceImageWidth else 1.0f
@@ -136,6 +149,7 @@ class OverlayManager(private val context: Context) {
 
             val minSp = config.minFontSp.coerceAtLeast(6)
             val maxSp = config.maxFontSp.coerceAtLeast(minSp)
+            val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
             for (item in validClusters) {
                 val box = item.boundingBox
@@ -148,18 +162,34 @@ class OverlayManager(private val context: Context) {
                 val left = scaledLeft.coerceIn(0, (screenWidth - (30 * density).toInt()).coerceAtLeast(0))
                 val top = scaledTop.coerceIn(0, (screenHeight - (20 * density).toInt()).coerceAtLeast(0))
                 val width = scaledWidth.coerceAtMost(screenWidth - left)
-                val height = scaledHeight.coerceAtMost(screenHeight - top)
+                val originalHeight = scaledHeight.coerceAtMost(screenHeight - top)
+
+                // 【解决两行截断遮挡与滚动查看的核心设计】：
+                // 1. 下向自适应高度扩展：当单行译文因中文排版变两行时，允许气泡从原框高向下弹性延伸，
+                //    最大可扩展至 2.4 倍原高（上限 48dp 或屏幕底边），彻底消除第二行被底框半遮挡的问题；
+                // 2. 内部垂直平滑滚动（Vertical Scroll）：若超长文本达到最大高度依然装不下，
+                //    自动启用原生内部滚动机制，用手指上下轻滑即可完整阅读全文。
+                val maxAllowedHeight = maxOf(originalHeight, (originalHeight * 2.4f).toInt(), (48 * density).toInt())
+                    .coerceAtMost((screenHeight - top).coerceAtLeast(originalHeight))
 
                 val bubbleView = TextView(context).apply {
-                    // 半透明深色圆角矩形（动态透明度，圆角 6dp）
                     val bgDrawable = GradientDrawable().apply {
                         setColor(bubbleColor)
                         cornerRadius = cornerRadiusPx
                     }
                     background = bgDrawable
                     setTextColor(Color.WHITE)
-                    setPadding(paddingPx, paddingPx, paddingPx, paddingPx)
-                    gravity = Gravity.CENTER_VERTICAL or Gravity.START
+                    setPadding(paddingH, paddingV, paddingH, paddingV)
+                    includeFontPadding = false
+                    setLineSpacing(0f, 1.05f)
+                    gravity = Gravity.TOP or Gravity.START
+
+                    minHeight = originalHeight
+                    maxHeight = maxAllowedHeight
+
+                    // 开启垂直平滑滚动
+                    movementMethod = ScrollingMovementMethod.getInstance()
+                    isVerticalScrollBarEnabled = false
 
                     // 文字自适应充满原框（可配置 minSp ~ maxSp）
                     TextViewCompat.setAutoSizeTextTypeUniformWithConfiguration(
@@ -170,11 +200,10 @@ class OverlayManager(private val context: Context) {
                         TypedValue.COMPLEX_UNIT_SP
                     )
 
-                    // 默认优先展示译文，若无则展示原文
                     var isShowingTranslation = true
                     text = item.translatedText ?: item.originalText
 
-                    // 点击单个气泡：在原文与译文之间来回切换
+                    // 点击气泡：在原文与译文之间切换
                     setOnClickListener {
                         isShowingTranslation = !isShowingTranslation
                         text = if (isShowingTranslation) {
@@ -182,10 +211,46 @@ class OverlayManager(private val context: Context) {
                         } else {
                             item.originalText
                         }
+                        scrollTo(0, 0)
+                    }
+
+                    // 区分轻触点击（切换原文/译文）与上下拖动（平滑滚动查看全文）
+                    var downX = 0f
+                    var downY = 0f
+                    var isScrolling = false
+
+                    setOnTouchListener { v, event ->
+                        when (event.action) {
+                            MotionEvent.ACTION_DOWN -> {
+                                downX = event.rawX
+                                downY = event.rawY
+                                isScrolling = false
+                                v.onTouchEvent(event)
+                                true
+                            }
+                            MotionEvent.ACTION_MOVE -> {
+                                val dx = abs(event.rawX - downX)
+                                val dy = abs(event.rawY - downY)
+                                if (dy > touchSlop || dx > touchSlop) {
+                                    isScrolling = true
+                                    v.parent?.requestDisallowInterceptTouchEvent(true)
+                                }
+                                v.onTouchEvent(event)
+                            }
+                            MotionEvent.ACTION_UP -> {
+                                if (!isScrolling) {
+                                    v.performClick()
+                                } else {
+                                    v.onTouchEvent(event)
+                                }
+                                true
+                            }
+                            else -> v.onTouchEvent(event)
+                        }
                     }
                 }
 
-                val childParams = FrameLayout.LayoutParams(width, height).apply {
+                val childParams = FrameLayout.LayoutParams(width, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
                     gravity = Gravity.TOP or Gravity.START
                     leftMargin = left
                     topMargin = top
