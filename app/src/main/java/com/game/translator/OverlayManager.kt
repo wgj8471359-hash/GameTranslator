@@ -5,10 +5,13 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.DisplayMetrics
 import android.util.TypedValue
+import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -85,10 +88,19 @@ class OverlayManager(private val context: Context) {
                 }
             }
 
-            val displayMetrics = context.resources.displayMetrics
-            val screenWidth = displayMetrics.widthPixels
-            val screenHeight = displayMetrics.heightPixels
-            val density = displayMetrics.density
+            val realDm = DisplayMetrics()
+            val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            val defaultDisplay = displayManager?.getDisplay(Display.DEFAULT_DISPLAY)
+            if (defaultDisplay != null) {
+                @Suppress("DEPRECATION")
+                defaultDisplay.getRealMetrics(realDm)
+            } else {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.getRealMetrics(realDm)
+            }
+            val screenWidth = realDm.widthPixels
+            val screenHeight = realDm.heightPixels
+            val density = realDm.density
             val cornerRadiusPx = 6f * density
             val paddingPx = (4f * density).toInt()
 

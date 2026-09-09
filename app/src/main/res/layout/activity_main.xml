@@ -336,6 +336,23 @@
                     android:textSize="16sp"
                     android:textStyle="bold" />
 
+                <!-- Floating Ball Size (dp) -->
+                <com.google.android.material.textfield.TextInputLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="10dp"
+                    android:hint="@string/label_ball_size"
+                    style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/etBallSize"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="number"
+                        android:singleLine="true"
+                        android:textColor="@color/text_primary" />
+                </com.google.android.material.textfield.TextInputLayout>
+
                 <!-- Bubble Alpha -->
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"
@@ -448,8 +465,30 @@
                     android:id="@+id/btnBatteryOptimization"
                     android:layout_width="match_parent"
                     android:layout_height="48dp"
+                    android:layout_marginBottom="10dp"
                     android:backgroundTint="@color/surface_variant"
                     android:text="@string/btn_battery_optimization"
+                    android:textColor="@color/text_secondary"
+                    app:cornerRadius="8dp"
+                    style="@style/Widget.MaterialComponents.Button.TextButton" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnSaveConfig"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginBottom="10dp"
+                    android:backgroundTint="@color/surface_variant"
+                    android:text="@string/btn_save_config"
+                    android:textColor="@color/primary"
+                    app:cornerRadius="8dp"
+                    style="@style/Widget.MaterialComponents.Button.TextButton" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnResetRecommend"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:backgroundTint="@color/surface_variant"
+                    android:text="@string/btn_reset_recommend"
                     android:textColor="@color/text_secondary"
                     app:cornerRadius="8dp"
                     style="@style/Widget.MaterialComponents.Button.TextButton" />

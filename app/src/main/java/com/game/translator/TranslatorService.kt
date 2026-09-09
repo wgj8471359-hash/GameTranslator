@@ -22,6 +22,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.DisplayMetrics
+import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -73,6 +74,7 @@ class TranslatorService : Service() {
     private var currentWidth = 0
     private var currentHeight = 0
     private var currentDpi = 0
+    private var displayListener: DisplayManager.DisplayListener? = null
 
     // 悬浮球视图及布局参数
     private var floatingBallView: ImageView? = null
@@ -173,26 +175,77 @@ class TranslatorService : Service() {
     private data class ScreenMetrics(val width: Int, val height: Int, val densityDpi: Int)
 
     /**
-     * 动态获取当前物理屏幕的方向与像素边界（支持 Android 30+ WindowMetrics）
+     * 动态获取当前物理硬件真实屏幕尺寸（严格保证横竖屏 1:1 精确映射）
      */
     private fun getCurrentScreenMetrics(): ScreenMetrics {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val bounds = windowManager.currentWindowMetrics.bounds
-            val config = resources.configuration
-            ScreenMetrics(
-                width = bounds.width(),
-                height = bounds.height(),
-                densityDpi = config.densityDpi
-            )
+        val displayManager = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+        val defaultDisplay = displayManager?.getDisplay(Display.DEFAULT_DISPLAY)
+        val dm = DisplayMetrics()
+        if (defaultDisplay != null) {
+            @Suppress("DEPRECATION")
+            defaultDisplay.getRealMetrics(dm)
         } else {
-            val dm = DisplayMetrics()
             @Suppress("DEPRECATION")
             windowManager.defaultDisplay.getRealMetrics(dm)
-            ScreenMetrics(
-                width = dm.widthPixels,
-                height = dm.heightPixels,
-                densityDpi = dm.densityDpi
-            )
+        }
+        return ScreenMetrics(
+            width = dm.widthPixels,
+            height = dm.heightPixels,
+            densityDpi = dm.densityDpi
+        )
+    }
+
+    /**
+     * 注册硬件屏幕旋转与分辨率变化监听器，实现横屏游戏即时无缝适配
+     */
+    private fun registerDisplayListener() {
+        if (displayListener != null) return
+        val displayManager = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return
+        val listener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) {}
+            override fun onDisplayRemoved(displayId: Int) {}
+            override fun onDisplayChanged(displayId: Int) {
+                if (displayId == Display.DEFAULT_DISPLAY) {
+                    mainHandler.post {
+                        checkAndResizeCaptureSession()
+                        updateFloatingBallForOrientation()
+                    }
+                }
+            }
+        }
+        displayManager.registerDisplayListener(listener, mainHandler)
+        displayListener = listener
+    }
+
+    private fun unregisterDisplayListener() {
+        displayListener?.let {
+            val displayManager = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            displayManager?.unregisterDisplayListener(it)
+            displayListener = null
+        }
+    }
+
+    /**
+     * 屏幕旋转时同步校准悬浮球坐标，防止被挤出屏幕
+     */
+    private fun updateFloatingBallForOrientation() {
+        val ballView = floatingBallView ?: return
+        val params = floatingBallParams ?: return
+        val metrics = getCurrentScreenMetrics()
+        val ballSize = params.width
+
+        // 确保 Y 坐标在屏幕范围内
+        params.y = params.y.coerceIn(0, (metrics.height - ballSize).coerceAtLeast(0))
+
+        // 贴靠最近边缘并保持半隐
+        val isLeftDocked = params.x + ballSize / 2 < metrics.width / 2
+        params.x = if (isLeftDocked) -ballSize / 2 else metrics.width - ballSize / 2
+        ballView.alpha = 0.45f
+
+        try {
+            windowManager.updateViewLayout(ballView, params)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
@@ -216,6 +269,9 @@ class TranslatorService : Service() {
         }
         proj.registerCallback(callback, mainHandler)
         projectionCallback = callback
+
+        // 注册屏幕旋转动态监听
+        registerDisplayListener()
 
         val reader = ImageReader.newInstance(currentWidth, currentHeight, PixelFormat.RGBA_8888, 2)
         imageReader = reader
@@ -261,6 +317,7 @@ class TranslatorService : Service() {
      * 释放屏幕捕获会话
      */
     private fun releaseCaptureSession() {
+        unregisterDisplayListener()
         projectionCallback?.let {
             try {
                 mediaProjection?.unregisterCallback(it)
@@ -285,14 +342,16 @@ class TranslatorService : Service() {
     }
 
     /**
-     * 初始化半透明圆形悬浮球
+     * 初始化半透明悬浮球（支持大小自定义与松手贴边 50% 半隐藏）
      */
     @SuppressLint("ClickableViewAccessibility")
     private fun initFloatingBall() {
         if (floatingBallView != null) return
 
+        val prefs = MainActivity.getPrefs(this)
+        val ballSizeDp = prefs.getInt(MainActivity.KEY_BALL_SIZE_DP, 44)
         val density = resources.displayMetrics.density
-        val ballSize = (54 * density).toInt()
+        val ballSize = (ballSizeDp * density).toInt()
         val screenMetrics = getCurrentScreenMetrics()
 
         val params = WindowManager.LayoutParams().apply {
@@ -307,7 +366,8 @@ class TranslatorService : Service() {
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
             format = PixelFormat.TRANSLUCENT
             gravity = Gravity.TOP or Gravity.START
-            x = screenMetrics.width - ballSize - (16 * density).toInt()
+            // 初始吸附在屏幕右侧边缘并隐藏半边 (50%)
+            x = screenMetrics.width - ballSize / 2
             y = screenMetrics.height / 3
         }
         floatingBallParams = params
@@ -315,8 +375,9 @@ class TranslatorService : Service() {
         val ballView = ImageView(this).apply {
             setBackgroundResource(R.drawable.bg_floating_ball)
             setImageResource(R.drawable.ic_translate)
-            val iconPadding = (12 * density).toInt()
+            val iconPadding = (ballSizeDp * 0.22f * density).toInt().coerceAtLeast((6 * density).toInt())
             setPadding(iconPadding, iconPadding, iconPadding, iconPadding)
+            alpha = 0.45f // 贴边未操作时半透明
         }
 
         val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
@@ -336,6 +397,7 @@ class TranslatorService : Service() {
                         initialTouchX = event.rawX
                         initialTouchY = event.rawY
                         isDragging = false
+                        ballView.alpha = 1.0f // 按下立刻高亮
                         return true
                     }
                     MotionEvent.ACTION_MOVE -> {
@@ -350,14 +412,28 @@ class TranslatorService : Service() {
                         return true
                     }
                     MotionEvent.ACTION_UP -> {
+                        val screenMetrics = getCurrentScreenMetrics()
+                        val screenWidth = screenMetrics.width
+                        val screenHeight = screenMetrics.height
+
                         if (!isDragging) {
+                            // 单击事件：短暂保持高亮触发翻译，随后恢复半透明
+                            ballView.alpha = 1.0f
                             handleFloatingBallClick()
+                            mainHandler.postDelayed({
+                                ballView.alpha = 0.45f
+                            }, 1200)
                         } else {
-                            // 松手贴边平滑吸附
-                            val screenWidth = getCurrentScreenMetrics().width
+                            // 松手贴边半隐藏：吸附到左侧或右侧边缘，隐藏 50% 身位
                             val middleX = screenWidth / 2
-                            val edgeMargin = (12 * density).toInt()
-                            params.x = if (params.x + ballSize / 2 < middleX) edgeMargin else screenWidth - ballSize - edgeMargin
+                            params.x = if (params.x + ballSize / 2 < middleX) {
+                                -ballSize / 2
+                            } else {
+                                screenWidth - ballSize / 2
+                            }
+                            // 限制 Y 轴不要超出屏幕上下边界
+                            params.y = params.y.coerceIn(0, (screenHeight - ballSize).coerceAtLeast(0))
+                            ballView.alpha = 0.45f
                             windowManager.updateViewLayout(ballView, params)
                         }
                         return true
@@ -433,6 +509,9 @@ class TranslatorService : Service() {
                     return@launch
                 }
 
+                // 交互反馈：截屏完成后立即弹出提示词句，告知用户正在处理
+                Toast.makeText(this@TranslatorService, R.string.toast_translating, Toast.LENGTH_SHORT).show()
+
                 // 3. 读取用户最新配置（含 API Key）
                 val prefs = MainActivity.getPrefs(this@TranslatorService)
                 val lineGapRatio = prefs.getFloat(MainActivity.KEY_LINE_GAP_RATIO, 1.2f)
@@ -462,10 +541,10 @@ class TranslatorService : Service() {
                     endpointUrl = prefs.getString(MainActivity.KEY_ENDPOINT, getString(R.string.default_endpoint_url)) ?: "",
                     apiKey = prefs.getString(MainActivity.KEY_API_KEY, null),
                     modelName = prefs.getString(MainActivity.KEY_MODEL, getString(R.string.default_model_name)) ?: "",
-                    temperature = prefs.getFloat(MainActivity.KEY_TEMPERATURE, 0.1f),
-                    topP = prefs.getFloat(MainActivity.KEY_TOP_P, 0.7f),
+                    temperature = prefs.getFloat(MainActivity.KEY_TEMPERATURE, 0.7f),
+                    topP = prefs.getFloat(MainActivity.KEY_TOP_P, 0.6f),
                     frequencyPenalty = prefs.getFloat(MainActivity.KEY_FREQUENCY_PENALTY, 1.05f),
-                    maxTokens = prefs.getInt(MainActivity.KEY_MAX_TOKENS, 1024),
+                    maxTokens = prefs.getInt(MainActivity.KEY_MAX_TOKENS, 4096),
                     systemPrompt = prefs.getString(MainActivity.KEY_SYSTEM_PROMPT, getString(R.string.default_system_prompt)) ?: ""
                 )
 

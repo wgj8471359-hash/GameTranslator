@@ -35,6 +35,7 @@ class HyMtClient {
         val temperature: Float,
         @SerializedName("top_p") val topP: Float,
         @SerializedName("frequency_penalty") val frequencyPenalty: Float,
+        @SerializedName("repetition_penalty") val repetitionPenalty: Float,
         @SerializedName("max_tokens") val maxTokens: Int
     )
 
@@ -68,7 +69,7 @@ class HyMtClient {
     )
 
     /**
-     * 发送结构化单次批量翻译请求
+     * 发送结构化单次批量翻译请求（严格对齐腾讯混元官方无 system_prompt 规范）
      */
     suspend fun translate(
         clusters: List<ClusteredText>,
@@ -78,21 +79,30 @@ class HyMtClient {
             return@withContext Result.success(clusters)
         }
 
-        // 拼接格式化的带编号待翻译原文
-        val userPromptBuilder = StringBuilder()
-        for (item in clusters) {
-            userPromptBuilder.append("[${item.id}] ${item.originalText}\n")
-        }
+        // 遵循官方 README_CN.md 结构化数据指令组装统一 User Message
+        val fullUserPrompt = buildString {
+            if (config.systemPrompt.isNotBlank()) {
+                append(config.systemPrompt.trim())
+                if (!config.systemPrompt.contains("# 数据输入")) {
+                    append("\n\n# 数据输入\n")
+                } else {
+                    append("\n")
+                }
+            }
+            for (item in clusters) {
+                append("[${item.id}] ${item.originalText}\n")
+            }
+        }.trim()
 
         val requestPayload = ChatCompletionRequest(
             model = config.modelName,
             messages = listOf(
-                ChatMessage(role = "system", content = config.systemPrompt),
-                ChatMessage(role = "user", content = userPromptBuilder.toString().trim())
+                ChatMessage(role = "user", content = fullUserPrompt)
             ),
             temperature = config.temperature,
             topP = config.topP,
             frequencyPenalty = config.frequencyPenalty,
+            repetitionPenalty = config.frequencyPenalty,
             maxTokens = config.maxTokens
         )
 

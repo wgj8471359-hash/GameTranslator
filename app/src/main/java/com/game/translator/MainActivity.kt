@@ -36,6 +36,7 @@ class MainActivity : AppCompatActivity() {
         const val KEY_BUBBLE_ALPHA = "bubble_alpha"
         const val KEY_BUBBLE_FONT_MIN_SP = "bubble_font_min_sp"
         const val KEY_BUBBLE_FONT_MAX_SP = "bubble_font_max_sp"
+        const val KEY_BALL_SIZE_DP = "ball_size_dp"
 
         fun getPrefs(context: Context): SharedPreferences {
             return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -50,6 +51,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var etFrequencyPenalty: TextInputEditText
     private lateinit var etMaxTokens: TextInputEditText
     private lateinit var etSystemPrompt: TextInputEditText
+    private lateinit var etBallSize: TextInputEditText
     private lateinit var etLineGapRatio: TextInputEditText
     private lateinit var etMinTextLength: TextInputEditText
     private lateinit var etHorizontalOverlapTolerance: TextInputEditText
@@ -58,6 +60,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var etBubbleFontMaxSp: TextInputEditText
 
     private lateinit var btnSaveConfig: MaterialButton
+    private lateinit var btnResetRecommend: MaterialButton
     private lateinit var btnStartService: MaterialButton
     private lateinit var btnStopService: MaterialButton
     private lateinit var btnBatteryOptimization: MaterialButton
@@ -109,6 +112,7 @@ class MainActivity : AppCompatActivity() {
         etFrequencyPenalty = findViewById(R.id.etFrequencyPenalty)
         etMaxTokens = findViewById(R.id.etMaxTokens)
         etSystemPrompt = findViewById(R.id.etSystemPrompt)
+        etBallSize = findViewById(R.id.etBallSize)
         etLineGapRatio = findViewById(R.id.etLineGapRatio)
         etMinTextLength = findViewById(R.id.etMinTextLength)
         etHorizontalOverlapTolerance = findViewById(R.id.etHorizontalOverlapTolerance)
@@ -117,6 +121,7 @@ class MainActivity : AppCompatActivity() {
         etBubbleFontMaxSp = findViewById(R.id.etBubbleFontMaxSp)
 
         btnSaveConfig = findViewById(R.id.btnSaveConfig)
+        btnResetRecommend = findViewById(R.id.btnResetRecommend)
         btnStartService = findViewById(R.id.btnStartService)
         btnStopService = findViewById(R.id.btnStopService)
         btnBatteryOptimization = findViewById(R.id.btnBatteryOptimization)
@@ -127,11 +132,12 @@ class MainActivity : AppCompatActivity() {
         etEndpoint.setText(prefs.getString(KEY_ENDPOINT, getString(R.string.default_endpoint_url)))
         etApiKey.setText(prefs.getString(KEY_API_KEY, ""))
         etModelName.setText(prefs.getString(KEY_MODEL, getString(R.string.default_model_name)))
-        etTemperature.setText(prefs.getFloat(KEY_TEMPERATURE, 0.1f).toString())
-        etTopP.setText(prefs.getFloat(KEY_TOP_P, 0.7f).toString())
+        etTemperature.setText(prefs.getFloat(KEY_TEMPERATURE, 0.7f).toString())
+        etTopP.setText(prefs.getFloat(KEY_TOP_P, 0.6f).toString())
         etFrequencyPenalty.setText(prefs.getFloat(KEY_FREQUENCY_PENALTY, 1.05f).toString())
-        etMaxTokens.setText(prefs.getInt(KEY_MAX_TOKENS, 1024).toString())
+        etMaxTokens.setText(prefs.getInt(KEY_MAX_TOKENS, 4096).toString())
         etSystemPrompt.setText(prefs.getString(KEY_SYSTEM_PROMPT, getString(R.string.default_system_prompt)))
+        etBallSize.setText(prefs.getInt(KEY_BALL_SIZE_DP, 44).toString())
         etLineGapRatio.setText(prefs.getFloat(KEY_LINE_GAP_RATIO, 1.2f).toString())
         etMinTextLength.setText(prefs.getInt(KEY_MIN_TEXT_LENGTH, 2).toString())
         etHorizontalOverlapTolerance.setText(prefs.getFloat(KEY_HORIZONTAL_OVERLAP_TOLERANCE, -20f).toString())
@@ -146,11 +152,12 @@ class MainActivity : AppCompatActivity() {
             putString(KEY_ENDPOINT, etEndpoint.text.toString().trim())
             putString(KEY_API_KEY, etApiKey.text.toString().trim())
             putString(KEY_MODEL, etModelName.text.toString().trim())
-            putFloat(KEY_TEMPERATURE, etTemperature.text.toString().toFloatOrNull() ?: 0.1f)
-            putFloat(KEY_TOP_P, etTopP.text.toString().toFloatOrNull() ?: 0.7f)
+            putFloat(KEY_TEMPERATURE, etTemperature.text.toString().toFloatOrNull() ?: 0.7f)
+            putFloat(KEY_TOP_P, etTopP.text.toString().toFloatOrNull() ?: 0.6f)
             putFloat(KEY_FREQUENCY_PENALTY, etFrequencyPenalty.text.toString().toFloatOrNull() ?: 1.05f)
-            putInt(KEY_MAX_TOKENS, etMaxTokens.text.toString().toIntOrNull() ?: 1024)
+            putInt(KEY_MAX_TOKENS, etMaxTokens.text.toString().toIntOrNull() ?: 4096)
             putString(KEY_SYSTEM_PROMPT, etSystemPrompt.text.toString().trim())
+            putInt(KEY_BALL_SIZE_DP, (etBallSize.text.toString().toIntOrNull() ?: 44).coerceIn(32, 72))
             putFloat(KEY_LINE_GAP_RATIO, etLineGapRatio.text.toString().toFloatOrNull() ?: 1.2f)
             putInt(KEY_MIN_TEXT_LENGTH, etMinTextLength.text.toString().toIntOrNull() ?: 2)
             putFloat(KEY_HORIZONTAL_OVERLAP_TOLERANCE, etHorizontalOverlapTolerance.text.toString().toFloatOrNull() ?: -20f)
@@ -165,6 +172,17 @@ class MainActivity : AppCompatActivity() {
     private fun setupListeners() {
         btnSaveConfig.setOnClickListener {
             saveConfig()
+        }
+
+        btnResetRecommend.setOnClickListener {
+            etTemperature.setText("0.7")
+            etTopP.setText("0.6")
+            etFrequencyPenalty.setText("1.05")
+            etMaxTokens.setText("4096")
+            etBallSize.setText("44")
+            etSystemPrompt.setText(getString(R.string.default_system_prompt))
+            saveConfig()
+            Toast.makeText(this, R.string.toast_reset_recommend, Toast.LENGTH_SHORT).show()
         }
 
         btnStartService.setOnClickListener {
