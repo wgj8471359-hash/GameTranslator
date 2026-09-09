@@ -587,6 +587,9 @@ class TranslatorService : Service() {
                     return@launch
                 }
 
+                val timeoutSeconds = prefs.getInt(MainActivity.KEY_TIMEOUT_SECONDS, 60)
+                val streamMode = prefs.getBoolean(MainActivity.KEY_STREAM_MODE, true)
+
                 val config = HyMtClient.TranslationConfig(
                     endpointUrl = prefs.getString(MainActivity.KEY_ENDPOINT, getString(R.string.default_endpoint_url)) ?: "",
                     apiKey = prefs.getString(MainActivity.KEY_API_KEY, null),
@@ -595,22 +598,45 @@ class TranslatorService : Service() {
                     topP = prefs.getFloat(MainActivity.KEY_TOP_P, 0.6f),
                     frequencyPenalty = prefs.getFloat(MainActivity.KEY_FREQUENCY_PENALTY, 1.05f),
                     maxTokens = prefs.getInt(MainActivity.KEY_MAX_TOKENS, 4096),
-                    systemPrompt = prefs.getString(MainActivity.KEY_SYSTEM_PROMPT, getString(R.string.default_system_prompt)) ?: ""
+                    systemPrompt = prefs.getString(MainActivity.KEY_SYSTEM_PROMPT, getString(R.string.default_system_prompt)) ?: "",
+                    timeoutSeconds = timeoutSeconds,
+                    streamMode = streamMode
                 )
 
-                // 5. 请求本地/局域网大模型单次结构化批量翻译
-                val result = hyMtClient.translate(clusters, config)
+                val overlayConfig = OverlayManager.OverlayConfig(
+                    minTextLength = minTextLength,
+                    bubbleAlphaPercent = bubbleAlpha,
+                    minFontSp = fontMinSp,
+                    maxFontSp = fontMaxSp,
+                    sourceImageWidth = bmpWidth,
+                    sourceImageHeight = bmpHeight
+                )
+
+                // 5. 提前准备透明气泡图层（若开启流式，第一句生成出来时以零等待上屏呈现）
+                if (streamMode) {
+                    overlayManager.prepareOverlay(overlayConfig)
+                }
+
+                // 6. 请求本地/局域网大模型流式或单次翻译
+                val result = hyMtClient.translateStream(clusters, config) { clusterId, text, isFinished ->
+                    if (streamMode) {
+                        val cluster = clusters.find { it.id == clusterId }
+                        if (cluster != null) {
+                            cluster.translatedText = text
+                            overlayManager.showOrUpdateBubble(cluster, overlayConfig, isFinished)
+                        }
+                    }
+                }
+
                 result.onSuccess { translatedClusters ->
-                    // 6. 浮层展示半透明圆角气泡
-                    val overlayConfig = OverlayManager.OverlayConfig(
-                        minTextLength = minTextLength,
-                        bubbleAlphaPercent = bubbleAlpha,
-                        minFontSp = fontMinSp,
-                        maxFontSp = fontMaxSp,
-                        sourceImageWidth = bmpWidth,
-                        sourceImageHeight = bmpHeight
-                    )
-                    overlayManager.showOverlay(translatedClusters, overlayConfig)
+                    if (!streamMode) {
+                        overlayManager.showOverlay(translatedClusters, overlayConfig)
+                    } else {
+                        // 确认所有气泡最终状态均已正确落地，无闪烁刷新
+                        for (item in translatedClusters) {
+                            overlayManager.showOrUpdateBubble(item, overlayConfig, isFinished = true)
+                        }
+                    }
                 }.onFailure { error ->
                     val msg = getString(R.string.toast_translation_failed, error.localizedMessage ?: "未知错误")
                     Toast.makeText(this@TranslatorService, msg, Toast.LENGTH_LONG).show()

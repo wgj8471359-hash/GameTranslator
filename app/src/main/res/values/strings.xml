@@ -13,6 +13,7 @@
     <string name="default_top_p">0.6</string>
     <string name="default_frequency_penalty">1.05</string>
     <string name="default_max_tokens">4096</string>
+    <string name="default_timeout_seconds">60</string>
     <string name="default_ball_size_dp">44</string>
     <string name="default_line_gap_ratio">1.2</string>
     <string name="default_min_text_length">2</string>
@@ -40,6 +41,8 @@
     <string name="label_top_p">Top P (推荐 0.6)</string>
     <string name="label_frequency_penalty">Frequency Penalty (推荐 1.05)</string>
     <string name="label_max_tokens">Max Tokens (推荐 4096)</string>
+    <string name="label_timeout_seconds">请求超时时间 (秒，推荐 60)</string>
+    <string name="label_stream_mode">开启流式逐句呈现 (实时上屏防超时)</string>
     <string name="label_system_prompt">系统提示词 (System Prompt)</string>
 
     <string name="title_control">服务控制与权限</string>

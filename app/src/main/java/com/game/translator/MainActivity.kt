@@ -16,6 +16,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.switchmaterial.SwitchMaterial
 import com.google.android.material.textfield.TextInputEditText
 
 class MainActivity : AppCompatActivity() {
@@ -29,6 +30,8 @@ class MainActivity : AppCompatActivity() {
         const val KEY_TOP_P = "top_p"
         const val KEY_FREQUENCY_PENALTY = "frequency_penalty"
         const val KEY_MAX_TOKENS = "max_tokens"
+        const val KEY_TIMEOUT_SECONDS = "timeout_seconds"
+        const val KEY_STREAM_MODE = "stream_mode"
         const val KEY_SYSTEM_PROMPT = "system_prompt"
         const val KEY_LINE_GAP_RATIO = "line_gap_ratio"
         const val KEY_MIN_TEXT_LENGTH = "min_text_length"
@@ -50,6 +53,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var etTopP: TextInputEditText
     private lateinit var etFrequencyPenalty: TextInputEditText
     private lateinit var etMaxTokens: TextInputEditText
+    private lateinit var etTimeoutSeconds: TextInputEditText
+    private lateinit var switchStreamMode: SwitchMaterial
     private lateinit var etSystemPrompt: TextInputEditText
     private lateinit var etBallSize: TextInputEditText
     private lateinit var etLineGapRatio: TextInputEditText
@@ -111,6 +116,8 @@ class MainActivity : AppCompatActivity() {
         etTopP = findViewById(R.id.etTopP)
         etFrequencyPenalty = findViewById(R.id.etFrequencyPenalty)
         etMaxTokens = findViewById(R.id.etMaxTokens)
+        etTimeoutSeconds = findViewById(R.id.etTimeoutSeconds)
+        switchStreamMode = findViewById(R.id.switchStreamMode)
         etSystemPrompt = findViewById(R.id.etSystemPrompt)
         etBallSize = findViewById(R.id.etBallSize)
         etLineGapRatio = findViewById(R.id.etLineGapRatio)
@@ -136,6 +143,8 @@ class MainActivity : AppCompatActivity() {
         etTopP.setText(prefs.getFloat(KEY_TOP_P, 0.6f).toString())
         etFrequencyPenalty.setText(prefs.getFloat(KEY_FREQUENCY_PENALTY, 1.05f).toString())
         etMaxTokens.setText(prefs.getInt(KEY_MAX_TOKENS, 4096).toString())
+        etTimeoutSeconds.setText(prefs.getInt(KEY_TIMEOUT_SECONDS, 60).toString())
+        switchStreamMode.isChecked = prefs.getBoolean(KEY_STREAM_MODE, true)
         etSystemPrompt.setText(prefs.getString(KEY_SYSTEM_PROMPT, getString(R.string.default_system_prompt)))
         etBallSize.setText(prefs.getInt(KEY_BALL_SIZE_DP, 44).toString())
         etLineGapRatio.setText(prefs.getFloat(KEY_LINE_GAP_RATIO, 1.2f).toString())
@@ -156,6 +165,8 @@ class MainActivity : AppCompatActivity() {
             putFloat(KEY_TOP_P, etTopP.text.toString().toFloatOrNull() ?: 0.6f)
             putFloat(KEY_FREQUENCY_PENALTY, etFrequencyPenalty.text.toString().toFloatOrNull() ?: 1.05f)
             putInt(KEY_MAX_TOKENS, etMaxTokens.text.toString().toIntOrNull() ?: 4096)
+            putInt(KEY_TIMEOUT_SECONDS, (etTimeoutSeconds.text.toString().toIntOrNull() ?: 60).coerceIn(5, 600))
+            putBoolean(KEY_STREAM_MODE, switchStreamMode.isChecked)
             putString(KEY_SYSTEM_PROMPT, etSystemPrompt.text.toString().trim())
             putInt(KEY_BALL_SIZE_DP, (etBallSize.text.toString().toIntOrNull() ?: 44).coerceIn(32, 72))
             putFloat(KEY_LINE_GAP_RATIO, etLineGapRatio.text.toString().toFloatOrNull() ?: 1.2f)
@@ -179,6 +190,8 @@ class MainActivity : AppCompatActivity() {
             etTopP.setText("0.6")
             etFrequencyPenalty.setText("1.05")
             etMaxTokens.setText("4096")
+            etTimeoutSeconds.setText("60")
+            switchStreamMode.isChecked = true
             etBallSize.setText("44")
             etSystemPrompt.setText(getString(R.string.default_system_prompt))
             saveConfig()
