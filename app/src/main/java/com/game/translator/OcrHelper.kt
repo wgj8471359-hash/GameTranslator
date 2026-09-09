@@ -151,10 +151,13 @@ class OcrHelper {
             return@coroutineScope emptyList()
         }
 
-        // 多引擎结果去重：如果两个识别器命中了重叠区域（IoU 或重叠面积比 > 0.5），保留文本较完整者
+        // 多引擎与候选行去重：消除空间重叠行 (IoU > 0.3 或包含度 > 0.4)
         val validLines = mutableListOf<Text.Line>()
         for (candidate in rawLines) {
             val cBox = candidate.boundingBox ?: continue
+            val cArea = cBox.width().toLong() * cBox.height()
+            if (cArea <= 0) continue
+
             val duplicateIndex = validLines.indexOfFirst { existing ->
                 val eBox = existing.boundingBox ?: return@indexOfFirst false
                 val iLeft = max(cBox.left, eBox.left)
@@ -162,16 +165,20 @@ class OcrHelper {
                 val iRight = min(cBox.right, eBox.right)
                 val iBottom = min(cBox.bottom, eBox.bottom)
                 if (iLeft < iRight && iTop < iBottom) {
-                    val intersectionArea = (iRight - iLeft) * (iBottom - iTop)
-                    val minArea = min(cBox.width() * cBox.height(), eBox.width() * eBox.height())
-                    minArea > 0 && (intersectionArea.toFloat() / minArea) > 0.5f
+                    val interArea = (iRight - iLeft).toLong() * (iBottom - iTop)
+                    val eArea = eBox.width().toLong() * eBox.height()
+                    val minArea = min(cArea, eArea)
+                    val unionArea = cArea + eArea - interArea
+                    val iou = if (unionArea > 0) interArea.toFloat() / unionArea else 0f
+                    val iom = if (minArea > 0) interArea.toFloat() / minArea else 0f
+                    iou > 0.3f || iom > 0.4f
                 } else {
                     false
                 }
             }
 
             if (duplicateIndex >= 0) {
-                // 若新候选词长度更长（可能包含了完整假名或汉字），替换之
+                // 空间重叠时，保留文本更完整或长度更长的有效行
                 if (candidate.text.trim().length > validLines[duplicateIndex].text.trim().length) {
                     validLines[duplicateIndex] = candidate
                 }
@@ -213,10 +220,10 @@ class OcrHelper {
                 val hOverlap = (min(boxA.right, boxB.right) - max(boxA.left, boxB.left)).toFloat()
 
                 val shouldUnion = if (isVerticallyStacked) {
-                    // 上下换行段落：允许垂直间距在倍率内，且允许段落水平偏移容差
-                    vDist <= avgLineHeight * lineGapRatio && hOverlap > hTolerancePx
+                    // 上下换行段落：允许垂直间距在倍率内，且允许段落水平偏移容差（保证多行台词完整合并为单气泡）
+                    vDist <= avgLineHeight * lineGapRatio.coerceAtLeast(1.2f) && hOverlap > hTolerancePx
                 } else {
-                    // 水平同行：仅在实际重叠或微小词距时合并，禁止使用 -20dp 跨度容差合并独立按钮
+                    // 水平同行：仅在实际重叠或微小词距时合并，禁止使用跨度容差合并独立按钮
                     hOverlap > inlineWordGapTolerancePx
                 }
 
@@ -241,7 +248,23 @@ class OcrHelper {
             // 同一对话框内行按从上到下、从左到右排序拼接
             lines.sortWith(compareBy({ it.boundingBox?.top ?: 0 }, { it.boundingBox?.left ?: 0 }))
 
-            val mergedContent = lines.joinToString(" ") { it.text.trim() }.trim()
+            // 智能语言拼接：东亚汉字/日文假名间不强行插入空格，避免破坏词法结构
+            val mergedContent = buildString {
+                for (l in lines) {
+                    val t = l.text.trim()
+                    if (t.isEmpty()) continue
+                    if (isNotEmpty()) {
+                        val lastChar = last()
+                        val firstChar = t.first()
+                        if (isEastAsianChar(lastChar) && isEastAsianChar(firstChar)) {
+                            // CJK 无缝连接
+                        } else {
+                            append(" ")
+                        }
+                    }
+                    append(t)
+                }
+            }.trim()
 
             var left = Int.MAX_VALUE
             var top = Int.MAX_VALUE
@@ -262,10 +285,51 @@ class OcrHelper {
             }
         }
 
-        // 最终聚类按屏幕空间自上而下排序，并赋予从 1 开始的编号
-        tempClusters.sortWith(compareBy({ it.rect.top }, { it.rect.left }))
+        // 聚类层级 2D 防重叠碰撞抑制 (Cluster-level NMS)
+        // 彻底根除多引擎冲突或行切分差异导致的“两个译文气泡重叠覆盖”问题
+        tempClusters.sortByDescending { it.rect.width() * it.rect.height() }
+        val finalClusters = mutableListOf<TempCluster>()
 
-        tempClusters.mapIndexed { index, cluster ->
+        for (curr in tempClusters) {
+            val cRect = curr.rect
+            val cArea = cRect.width().toLong() * cRect.height()
+            var isDuplicate = false
+
+            for (idx in finalClusters.indices) {
+                val exist = finalClusters[idx]
+                val eRect = exist.rect
+                val iLeft = max(cRect.left, eRect.left)
+                val iTop = max(cRect.top, eRect.top)
+                val iRight = min(cRect.right, eRect.right)
+                val iBottom = min(cRect.bottom, eRect.bottom)
+                if (iLeft < iRight && iTop < iBottom) {
+                    val interArea = (iRight - iLeft).toLong() * (iBottom - iTop)
+                    val eArea = eRect.width().toLong() * eRect.height()
+                    val minArea = min(cArea, eArea)
+                    val unionArea = cArea + eArea - interArea
+                    val iou = if (unionArea > 0) interArea.toFloat() / unionArea else 0f
+                    val iom = if (minArea > 0) interArea.toFloat() / minArea else 0f
+
+                    if (iou > 0.3f || iom > 0.45f) {
+                        isDuplicate = true
+                        // 若候选气泡文本更长更完整，替换已有气泡
+                        if (curr.text.length > exist.text.length) {
+                            finalClusters[idx] = curr
+                        }
+                        break
+                    }
+                }
+            }
+
+            if (!isDuplicate) {
+                finalClusters.add(curr)
+            }
+        }
+
+        // 最终聚类按屏幕空间自上而下排序，并赋予从 1 开始的稳定编号
+        finalClusters.sortWith(compareBy({ it.rect.top }, { it.rect.left }))
+
+        finalClusters.mapIndexed { index, cluster ->
             ClusteredText(
                 id = index + 1,
                 originalText = cluster.text,
@@ -273,6 +337,14 @@ class OcrHelper {
                 boundingBox = cluster.rect
             )
         }
+    }
+
+    private fun isEastAsianChar(c: Char): Boolean {
+        val ub = Character.UnicodeBlock.of(c)
+        return ub == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS ||
+                ub == Character.UnicodeBlock.HIRAGANA ||
+                ub == Character.UnicodeBlock.KATAKANA ||
+                ub == Character.UnicodeBlock.CJK_SYMBOLS_AND_PUNCTUATION
     }
 
     fun release() {

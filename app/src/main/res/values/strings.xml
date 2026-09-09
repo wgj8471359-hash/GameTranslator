@@ -72,4 +72,5 @@
     <string name="toast_capture_failed">截屏捕获失败</string>
     <string name="toast_no_text_detected">未识别到有效文字</string>
     <string name="toast_translation_failed">翻译请求失败：%s</string>
+    <string name="toast_translation_cancelled">已取消当前翻译</string>
 </resources>

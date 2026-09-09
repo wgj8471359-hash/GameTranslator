@@ -3,20 +3,35 @@ package com.game.translator
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
+import kotlin.coroutines.coroutineContext
 
 class HyMtClient {
 
     companion object {
         const val STREAM_TYPE_FORM_B = "form_b"
         const val STREAM_TYPE_FORM_A = "form_a"
+    }
+
+    private val activeCalls = ConcurrentHashMap.newKeySet<Call>()
+
+    fun cancelAll() {
+        for (call in activeCalls) {
+            try {
+                call.cancel()
+            } catch (e: Exception) {}
+        }
+        activeCalls.clear()
     }
 
     private val baseClient = OkHttpClient.Builder()
@@ -167,8 +182,10 @@ class HyMtClient {
         val httpRequest = requestBuilder.build()
         val client = getClient(config.timeoutSeconds)
 
+        val call = client.newCall(httpRequest)
+        activeCalls.add(call)
         try {
-            client.newCall(httpRequest).execute().use { response ->
+            call.execute().use { response ->
                 val responseBody = response.body?.string() ?: ""
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
@@ -215,6 +232,8 @@ class HyMtClient {
             }
         } catch (e: Exception) {
             Result.failure(e)
+        } finally {
+            activeCalls.remove(call)
         }
     }
 
@@ -261,6 +280,7 @@ class HyMtClient {
         val finalUrl = buildRequestUrl(config.endpointUrl)
 
         for (item in clusters) {
+            if (!coroutineContext.isActive) break
             val original = item.originalText.trim()
             if (original.isEmpty()) continue
 
@@ -292,8 +312,12 @@ class HyMtClient {
             val httpRequest = requestBuilder.build()
             val textBuffer = StringBuilder()
 
+            val call = client.newCall(httpRequest)
+            activeCalls.add(call)
+
             try {
-                val response = client.newCall(httpRequest).execute()
+                val response = call.execute()
+
                 if (!response.isSuccessful) {
                     response.close()
                     item.translatedText = item.originalText
@@ -306,6 +330,7 @@ class HyMtClient {
                     val source = body.source()
                     body.use {
                         while (!source.exhausted()) {
+                            if (!coroutineContext.isActive) break
                             val line = source.readUtf8Line() ?: break
                             val trimmed = line.trim()
                             if (trimmed.isEmpty() || trimmed.startsWith(":") || trimmed.startsWith("event:")) continue
@@ -319,7 +344,7 @@ class HyMtClient {
                                     null
                                 }
                                 val deltaContent = chunk?.choices?.firstOrNull()?.delta?.content
-                                if (!deltaContent.isNullOrEmpty()) {
+                                if (!deltaContent.isNullOrEmpty() && coroutineContext.isActive) {
                                     textBuffer.append(deltaContent)
                                     var current = textBuffer.toString().trim()
                                     if (current.startsWith("```")) {
@@ -334,6 +359,8 @@ class HyMtClient {
                     }
                 }
 
+                if (!coroutineContext.isActive) break
+
                 var finalClean = textBuffer.toString().trim()
                 if (finalClean.startsWith("```")) {
                     finalClean = finalClean
@@ -347,9 +374,14 @@ class HyMtClient {
                 onProgress(item.id, textToDisplay, true)
 
             } catch (e: Exception) {
+                if (!coroutineContext.isActive || e.message?.contains("Canceled", ignoreCase = true) == true) {
+                    break
+                }
                 // 单句发生异常，降级显示原文并标记完成，不阻断后续气泡翻译
                 item.translatedText = item.originalText
                 onProgress(item.id, item.originalText, true)
+            } finally {
+                activeCalls.remove(call)
             }
         }
 
@@ -393,10 +425,17 @@ class HyMtClient {
         val httpRequest = requestBuilder.build()
         val client = getClient(config.timeoutSeconds)
 
+        val call = client.newCall(httpRequest)
+        activeCalls.add(call)
+
         try {
-            val response = client.newCall(httpRequest).execute()
+            val response = call.execute()
+
             if (!response.isSuccessful) {
                 response.close()
+                if (!coroutineContext.isActive) {
+                    return@withContext Result.failure(IOException("任务已取消"))
+                }
                 // 服务端可能不支持 stream，尝试自动降级到非流式
                 val fallbackRes = translate(clusters, config)
                 fallbackRes.onSuccess {
@@ -419,6 +458,7 @@ class HyMtClient {
 
             body.use {
                 while (!source.exhausted()) {
+                    if (!coroutineContext.isActive) break
                     val line = source.readUtf8Line() ?: break
                     val trimmed = line.trim()
                     if (trimmed.isEmpty() || trimmed.startsWith(":") || trimmed.startsWith("event:")) continue
@@ -437,7 +477,7 @@ class HyMtClient {
                         }
 
                         val deltaContent = chunk?.choices?.firstOrNull()?.delta?.content
-                        if (!deltaContent.isNullOrEmpty()) {
+                        if (!deltaContent.isNullOrEmpty() && coroutineContext.isActive) {
                             streamBuffer.append(deltaContent)
 
                             var cleanText = streamBuffer.toString()
@@ -457,19 +497,23 @@ class HyMtClient {
                                     if (isFinished) {
                                         reportedFinishedIds.add(id)
                                     }
-                                    if (text.isNotBlank()) {
+                                    if (text.isNotBlank() && coroutineContext.isActive) {
                                         onProgress(id, text, isFinished)
                                     }
                                 }
                             } else if (clusters.isNotEmpty()) {
                                 val rawText = cleanText.trim()
-                                if (rawText.isNotBlank()) {
+                                if (rawText.isNotBlank() && coroutineContext.isActive) {
                                     onProgress(clusters[0].id, rawText, false)
                                 }
                             }
                         }
                     }
                 }
+            }
+
+            if (!coroutineContext.isActive) {
+                return@withContext Result.failure(IOException("任务已取消"))
             }
 
             // 流式全部结束：提取最终结果并写入各 cluster
@@ -495,28 +539,39 @@ class HyMtClient {
 
             if (translationMap.isEmpty() && clusters.isNotEmpty()) {
                 clusters[0].translatedText = finalClean
-                onProgress(clusters[0].id, finalClean, true)
+                if (coroutineContext.isActive) {
+                    onProgress(clusters[0].id, finalClean, true)
+                }
             } else {
                 for (cluster in clusters) {
                     val text = translationMap[cluster.id] ?: cluster.originalText
                     cluster.translatedText = text
-                    onProgress(cluster.id, text, true)
+                    if (coroutineContext.isActive) {
+                        onProgress(cluster.id, text, true)
+                    }
                 }
             }
 
             Result.success(clusters)
         } catch (e: Exception) {
+            if (!coroutineContext.isActive || e.message?.contains("Canceled", ignoreCase = true) == true) {
+                return@withContext Result.failure(e)
+            }
             try {
                 val fallbackRes = translate(clusters, config)
                 fallbackRes.onSuccess {
                     for (item in it) {
-                        onProgress(item.id, item.translatedText ?: item.originalText, true)
+                        if (coroutineContext.isActive) {
+                            onProgress(item.id, item.translatedText ?: item.originalText, true)
+                        }
                     }
                 }
                 fallbackRes
             } catch (fallbackEx: Exception) {
                 Result.failure(e)
             }
+        } finally {
+            activeCalls.remove(call)
         }
     }
 }

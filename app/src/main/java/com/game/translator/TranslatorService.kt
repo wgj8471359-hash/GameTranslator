@@ -33,8 +33,10 @@ import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -73,6 +75,9 @@ class TranslatorService : Service() {
     private lateinit var hyMtClient: HyMtClient
     private lateinit var overlayManager: OverlayManager
 
+    // 正在运行的翻译协程任务
+    private var currentTranslationJob: Job? = null
+
     // 常驻屏幕捕获管道（规避 Android 14 单次令牌安全限制）
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
@@ -101,7 +106,12 @@ class TranslatorService : Service() {
 
         ocrHelper = OcrHelper()
         hyMtClient = HyMtClient()
-        overlayManager = OverlayManager(this)
+        overlayManager = OverlayManager(this).apply {
+            onDismissListener = {
+                // 用户点击空白区域关闭气泡时，立即终止后台还在进行的流式翻译与网络请求
+                cancelTranslation(notifyUser = false)
+            }
+        }
 
         createNotificationChannel()
     }
@@ -497,6 +507,21 @@ class TranslatorService : Service() {
     }
 
     /**
+     * 立即取消正在执行的截屏与流式翻译任务，释放所有网络连接与协程资源
+     */
+    private fun cancelTranslation(notifyUser: Boolean = false) {
+        currentTranslationJob?.cancel()
+        currentTranslationJob = null
+        hyMtClient.cancelAll()
+        overlayManager.dismiss()
+        floatingBallView?.visibility = View.VISIBLE
+        isTranslating.set(false)
+        if (notifyUser) {
+            Toast.makeText(this, R.string.toast_translation_cancelled, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
      * 单击与双击分发处理
      */
     private fun handleFloatingBallClick() {
@@ -511,6 +536,13 @@ class TranslatorService : Service() {
             }
             startActivity(configIntent)
         } else {
+            // 若当前正在翻译/流式吐字中，用户再次点击悬浮球，代表想停止当前翻译：立即中断！
+            if (isTranslating.get() || currentTranslationJob?.isActive == true) {
+                cancelTranslation(notifyUser = true)
+                lastClickTime = 0
+                return
+            }
+
             // 单击：延迟 300ms 触发截屏翻译，等待双击判定
             lastClickTime = currentTime
             val clickRunnable = Runnable {
@@ -536,7 +568,7 @@ class TranslatorService : Service() {
             return
         }
 
-        serviceScope.launch {
+        currentTranslationJob = serviceScope.launch {
             try {
                 // 1. 隐藏悬浮球与历史气泡，并留出 60ms 帧同步间隔，防止自身被截图录入
                 floatingBallView?.visibility = View.INVISIBLE
@@ -646,11 +678,14 @@ class TranslatorService : Service() {
                     Toast.makeText(this@TranslatorService, msg, Toast.LENGTH_LONG).show()
                 }
 
+            } catch (e: CancellationException) {
+                // 用户主动中断或切换页面关闭气泡，安全静默退出
             } catch (e: Exception) {
                 Toast.makeText(this@TranslatorService, "处理失败: ${e.message}", Toast.LENGTH_SHORT).show()
             } finally {
                 floatingBallView?.visibility = View.VISIBLE
                 isTranslating.set(false)
+                currentTranslationJob = null
             }
         }
     }
@@ -738,7 +773,7 @@ class TranslatorService : Service() {
             floatingBallView = null
         }
 
-        overlayManager.dismiss()
+        cancelTranslation(notifyUser = false)
         ocrHelper.release()
         releaseCaptureSession()
         mediaProjection?.stop()

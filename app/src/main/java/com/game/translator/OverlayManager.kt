@@ -39,7 +39,19 @@ class OverlayManager(private val context: Context) {
 
     private var rootOverlayView: FrameLayout? = null
     private var isShowing = false
+    private var isDismissed = false
     private val bubbleViews = mutableMapOf<Int, TextView>()
+
+    private data class BubbleLayoutInfo(
+        val id: Int,
+        var left: Int,
+        var top: Int,
+        var width: Int,
+        var height: Int
+    )
+    private val bubbleDataMap = mutableMapOf<Int, BubbleLayoutInfo>()
+
+    var onDismissListener: (() -> Unit)? = null
 
     private var currentConfig: OverlayConfig = OverlayConfig()
     private var currentScreenWidth = 0
@@ -60,6 +72,7 @@ class OverlayManager(private val context: Context) {
     }
 
     private fun prepareOverlayInternal(config: OverlayConfig) {
+        isDismissed = false
         if (isShowing && rootOverlayView != null) return
 
         val rootView = FrameLayout(context).apply {
@@ -158,6 +171,10 @@ class OverlayManager(private val context: Context) {
 
     @SuppressLint("ClickableViewAccessibility")
     private fun showOrUpdateBubbleInternal(item: ClusteredText, config: OverlayConfig, isFinished: Boolean) {
+        if (isDismissed) {
+            // 用户已关闭气泡，直接丢弃后续流式吐字，绝不重新弹出遮挡新画面
+            return
+        }
         if (!isShowing || rootOverlayView == null) {
             prepareOverlayInternal(config)
         }
@@ -173,6 +190,7 @@ class OverlayManager(private val context: Context) {
         // 若已完成生成且内容与原文完全一致或字数不足，则剔除该气泡避免遮挡游戏原文
         if (isFinished && (isSameAsOriginal || content.trim().length < config.minTextLength)) {
             val existing = bubbleViews.remove(item.id)
+            bubbleDataMap.remove(item.id)
             if (existing != null) {
                 rootView.removeView(existing)
             }
@@ -222,6 +240,28 @@ class OverlayManager(private val context: Context) {
         val maxAllowedHeight = maxOf(originalHeight, (originalHeight * 2.4f).toInt(), (48 * density).toInt())
             .coerceAtMost((screenHeight - top).coerceAtLeast(originalHeight))
 
+        // 动态防重叠碰撞布局调整：若水平投影重叠，根据已有气泡限制向下膨胀上限或推移垂直起始点，防止气泡上下重叠覆盖
+        var finalTop = top
+        var finalMaxHeight = maxAllowedHeight
+        val gapPx = (4f * density).toInt()
+
+        for ((_, exist) in bubbleDataMap) {
+            val hOverlap = maxOf(left, exist.left) < minOf(left + width, exist.left + exist.width)
+            if (hOverlap) {
+                if (finalTop >= exist.top) {
+                    val minAllowedTop = exist.top + exist.height + gapPx
+                    if (finalTop < minAllowedTop) {
+                        finalTop = minAllowedTop.coerceAtMost((screenHeight - (20 * density).toInt()).coerceAtLeast(0))
+                    }
+                } else {
+                    val spaceAbove = exist.top - finalTop - gapPx
+                    if (spaceAbove >= originalHeight) {
+                        finalMaxHeight = minOf(finalMaxHeight, spaceAbove)
+                    }
+                }
+            }
+        }
+
         val bubbleView = TextView(context).apply {
             val bgDrawable = GradientDrawable().apply {
                 setColor(bubbleColor)
@@ -235,7 +275,7 @@ class OverlayManager(private val context: Context) {
             gravity = Gravity.TOP or Gravity.START
 
             minHeight = originalHeight
-            maxHeight = maxAllowedHeight
+            maxHeight = finalMaxHeight
 
             // 开启垂直平滑滚动
             movementMethod = ScrollingMovementMethod.getInstance()
@@ -303,11 +343,12 @@ class OverlayManager(private val context: Context) {
         val childParams = FrameLayout.LayoutParams(width, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
             gravity = Gravity.TOP or Gravity.START
             leftMargin = left
-            topMargin = top
+            topMargin = finalTop
         }
 
         rootView.addView(bubbleView, childParams)
         bubbleViews[item.id] = bubbleView
+        bubbleDataMap[item.id] = BubbleLayoutInfo(item.id, left, finalTop, width, originalHeight)
     }
 
     /**
@@ -335,6 +376,7 @@ class OverlayManager(private val context: Context) {
      * 内部同步卸载悬浮气泡
      */
     private fun dismissInternal() {
+        isDismissed = true
         if (isShowing && rootOverlayView != null) {
             try {
                 windowManager.removeView(rootOverlayView)
@@ -343,8 +385,15 @@ class OverlayManager(private val context: Context) {
             } finally {
                 rootOverlayView = null
                 bubbleViews.clear()
+                bubbleDataMap.clear()
                 isShowing = false
+                onDismissListener?.invoke()
             }
+        } else {
+            bubbleViews.clear()
+            bubbleDataMap.clear()
+            isShowing = false
+            onDismissListener?.invoke()
         }
     }
 
