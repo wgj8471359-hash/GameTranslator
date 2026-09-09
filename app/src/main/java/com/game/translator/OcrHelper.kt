@@ -276,9 +276,9 @@ class OcrHelper {
     }
 
     fun release() {
-        try { koreanRecognizer.close() } catch (_: Throwable) {}
-        try { japaneseRecognizer.close() } catch (_: Throwable) {}
-        try { chineseRecognizer.close() } catch (_: Throwable) {}
-        try { latinRecognizer.close() } catch (_: Throwable) {}
+        try { koreanRecognizer.close() } catch (e: Throwable) {}
+        try { japaneseRecognizer.close() } catch (e: Throwable) {}
+        try { chineseRecognizer.close() } catch (e: Throwable) {}
+        try { latinRecognizer.close() } catch (e: Throwable) {}
     }
 }

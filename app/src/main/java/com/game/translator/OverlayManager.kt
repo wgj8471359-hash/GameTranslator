@@ -108,7 +108,7 @@ class OverlayManager(private val context: Context) {
                     rawWidth = bounds.width()
                     rawHeight = bounds.height()
                 }
-            } catch (_: Throwable) {}
+            } catch (e: Throwable) {}
         }
 
         val realDm = DisplayMetrics()

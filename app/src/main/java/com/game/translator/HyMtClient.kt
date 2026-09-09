@@ -315,7 +315,7 @@ class HyMtClient {
                                 if (dataJson.isEmpty()) continue
                                 val chunk = try {
                                     gson.fromJson(dataJson, ChatStreamChunk::class.java)
-                                } catch (_: Exception) {
+                                } catch (e: Exception) {
                                     null
                                 }
                                 val deltaContent = chunk?.choices?.firstOrNull()?.delta?.content
@@ -428,7 +428,7 @@ class HyMtClient {
                         if (dataJson.isEmpty()) continue
                         val chunk = try {
                             gson.fromJson(dataJson, ChatStreamChunk::class.java)
-                        } catch (_: Exception) {
+                        } catch (e: Exception) {
                             null
                         }
 
@@ -514,7 +514,7 @@ class HyMtClient {
                     }
                 }
                 fallbackRes
-            } catch (_: Exception) {
+            } catch (fallbackEx: Exception) {
                 Result.failure(e)
             }
         }
