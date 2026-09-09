@@ -1,0 +1,77 @@
+name: Build & Sign Test APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # 使用 GitHub Actions 官方 Gradle 工具链，摆脱对二进制 gradle-wrapper.jar 的依赖
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.5
+
+      # 编译 Debug 和 Release 安装包
+      - name: Build APKs with Gradle
+        run: gradle assembleRelease assembleDebug --stacktrace
+
+      # 自动生成临时测试密钥，并使用 apksigner 进行 V1 + V2 + V3 完整签名
+      # 避免国内定制 ROM（澎湃OS/MIUI/ColorOS/OriginOS等）拦截未签名应用或报严重证书风险
+      - name: Generate Keystore and Sign APK
+        run: |
+          echo "=== 1. Generating temporary test keystore ==="
+          keytool -genkeypair -v -keystore test.keystore \
+            -alias gametranslator \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass 12345678 -keypass 12345678 \
+            -dname "CN=GameTranslator, OU=App, O=Personal, L=Beijing, ST=Beijing, C=CN"
+
+          echo "=== 2. Locating latest Android Build Tools ==="
+          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
+          echo "Using Build-Tools: $BUILD_TOOLS_DIR"
+
+          # 优先签名 Release APK，若无则对 Debug APK 进行正式重签名
+          TARGET_APK=$(find app/build/outputs/apk/ -name "*release*.apk" | head -n 1)
+          if [ -z "$TARGET_APK" ]; then
+            TARGET_APK=$(find app/build/outputs/apk/ -name "*debug*.apk" | head -n 1)
+          fi
+          echo "Target APK to sign: $TARGET_APK"
+
+          mkdir -p build/dist
+          OUTPUT_APK="build/dist/GameTranslator-signed-test.apk"
+
+          echo "=== 3. Signing APK with apksigner (V1 + V2 + V3 scheme) ==="
+          $BUILD_TOOLS_DIR/apksigner sign --ks test.keystore \
+            --ks-pass pass:12345678 \
+            --ks-key-alias gametranslator \
+            --key-pass pass:12345678 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out "$OUTPUT_APK" \
+            "$TARGET_APK"
+
+          echo "=== 4. Verifying APK Signature ==="
+          $BUILD_TOOLS_DIR/apksigner verify --verbose "$OUTPUT_APK"
+
+      # 将签名后的安装包上传为 GitHub Actions Artifact，可直接下载安装至手机
+      - name: Upload Signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameTranslator-Signed-Test-APK
+          path: build/dist/GameTranslator-signed-test.apk
+          retention-days: 14

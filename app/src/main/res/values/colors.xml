@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#4A90E2</color>
+    <color name="primary_variant">#357ABD</color>
+    <color name="secondary">#34D399</color>
+    <color name="secondary_variant">#059669</color>
+    
+    <color name="background">#121216</color>
+    <color name="surface">#1E1E24</color>
+    <color name="surface_variant">#282832</color>
+    <color name="divider">#333344</color>
+
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#9CA3AF</color>
+    <color name="text_hint">#6B7280</color>
+
+    <color name="accent_blue">#3B82F6</color>
+    <color name="accent_green">#10B981</color>
+    <color name="accent_red">#EF4444</color>
+
+    <!-- 气泡覆盖层与悬浮球颜色 -->
+    <color name="bubble_bg">#D91E1E24</color>
+    <color name="floating_ball_bg">#B31E1E24</color>
+    <color name="floating_ball_ring">#4A90E2</color>
+</resources>

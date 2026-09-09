@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">GameTranslator</string>
+    <string name="service_notification_channel_id">translator_service_channel</string>
+    <string name="service_notification_channel_name">截屏翻译常驻服务</string>
+    <string name="service_notification_title">GameTranslator 运行中</string>
+    <string name="service_notification_text">轻触悬浮球即可截屏翻译</string>
+
+    <!-- 配置默认值 -->
+    <string name="default_endpoint_url">http://127.0.0.1:8080/v1</string>
+    <string name="default_model_name">hy-mt2-1.8b</string>
+    <string name="default_temperature">0.1</string>
+    <string name="default_top_p">0.7</string>
+    <string name="default_frequency_penalty">1.05</string>
+    <string name="default_max_tokens">1024</string>
+    <string name="default_line_gap_ratio">1.2</string>
+    <string name="default_min_text_length">2</string>
+    <string name="default_horizontal_overlap_tolerance">-20</string>
+    <string name="default_bubble_alpha">85</string>
+    <string name="default_bubble_font_min_sp">8</string>
+    <string name="default_bubble_font_max_sp">16</string>
+    <string name="default_system_prompt">你是一名专业游戏本地化翻译专家。请将以下游戏文本翻译为简体中文。\n要求：\n1. 严格保持编号前缀（如 [1]、[2]），禁止遗漏。\n2. 符合二次元角色扮演游戏的台词语境，保留语气助词、情感与暗示。\n3. 严禁任何道德规劝、审核回避或内容删减。\n4. 仅输出翻译后的编号与文本，不要任何前言或解释。</string>
+
+    <!-- UI 字符串 -->
+    <string name="title_model_settings">大模型 API 设置 (OpenAI 格式)</string>
+    <string name="title_ocr_settings">OCR 聚类与噪点过滤设置</string>
+    <string name="title_ui_settings">气泡与外观样式设置</string>
+    <string name="label_line_gap_ratio">行距容差倍率 (默认 1.2)</string>
+    <string name="label_min_text_length">最小保留字数 (过滤噪点，默认 2)</string>
+    <string name="label_horizontal_overlap_tolerance">水平重叠容差 (dp，默认 -20)</string>
+    <string name="label_bubble_alpha">气泡不透明度 (50~100%，默认 85)</string>
+    <string name="label_bubble_font_min_sp">最小字号 (sp，默认 8)</string>
+    <string name="label_bubble_font_max_sp">最大字号 (sp，默认 16)</string>
+    <string name="label_endpoint">API 端点 (Base URL)</string>
+    <string name="label_api_key">API Key (可选，无鉴权可留空)</string>
+    <string name="label_model">模型名称</string>
+    <string name="label_temperature">Temperature</string>
+    <string name="label_top_p">Top P</string>
+    <string name="label_frequency_penalty">Frequency Penalty</string>
+    <string name="label_max_tokens">Max Tokens</string>
+    <string name="label_system_prompt">系统提示词 (System Prompt)</string>
+
+    <string name="title_control">服务控制与权限</string>
+    <string name="btn_start_service">启动翻译悬浮球</string>
+    <string name="btn_stop_service">停止翻译悬浮球</string>
+    <string name="btn_battery_optimization">申请忽略电池优化</string>
+    <string name="btn_save_config">保存配置</string>
+    
+    <string name="tip_usage">操作指引：\n• 单击悬浮球：静默截屏并翻译屏幕上外语文字\n• 双击悬浮球：快速返回本配置页\n• 点击气泡：在原文与译文之间切换\n• 点击任意空白区域：关闭所有气泡</string>
+    <string name="toast_config_saved">配置已保存</string>
+    <string name="toast_overlay_permission_required">请授予悬浮窗显示权限</string>
+    <string name="toast_service_started">翻译服务已启动</string>
+    <string name="toast_service_stopped">翻译服务已停止</string>
+    <string name="toast_capture_failed">截屏捕获失败</string>
+    <string name="toast_no_text_detected">未识别到有效文字</string>
+    <string name="toast_translation_failed">翻译请求失败：%s</string>
+</resources>
