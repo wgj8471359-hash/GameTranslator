@@ -454,7 +454,6 @@ class HyMtClient {
             val source = body.source()
             val streamBuffer = StringBuilder()
             val idRegex = Regex("""[\\[【［](\d+)[\\]】］][:：]?""")
-            val reportedFinishedIds = mutableSetOf<Int>()
 
             body.use {
                 while (!source.exhausted()) {
@@ -494,9 +493,6 @@ class HyMtClient {
                                     val text = cleanText.substring(start, end).trim()
                                     val isFinished = (i + 1 < matches.size)
 
-                                    if (isFinished) {
-                                        reportedFinishedIds.add(id)
-                                    }
                                     if (text.isNotBlank() && coroutineContext.isActive) {
                                         onProgress(id, text, isFinished)
                                     }

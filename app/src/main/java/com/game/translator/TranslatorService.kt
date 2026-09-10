@@ -98,6 +98,7 @@ class TranslatorService : Service() {
     // 并发防重入锁
     private val isTranslating = AtomicBoolean(false)
     private val isCancelling = AtomicBoolean(false)
+    private val isStopping = AtomicBoolean(false)
 
     override fun onCreate() {
         super.onCreate()
@@ -783,8 +784,7 @@ class TranslatorService : Service() {
      * 彻底停止服务并完整释放所有前台通知、常驻屏幕流与媒体投影资源
      */
     private fun stopServiceInternal() {
-        if (!isRunning && mediaProjection == null && floatingBallView == null) {
-            stopSelf()
+        if (!isStopping.compareAndSet(false, true)) {
             return
         }
         isRunning = false

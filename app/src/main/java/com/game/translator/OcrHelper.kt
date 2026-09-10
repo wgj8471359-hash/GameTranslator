@@ -87,6 +87,94 @@ class OcrHelper {
         }
     }
 
+    private data class TextSegment(
+        val text: String,
+        val boundingBox: Rect
+    )
+
+    /**
+     * 文本行内分列与词元切分：
+     * 针对 Google ML Kit 将同一水平基线上并排的两列（如左侧属性名、右侧数值，或双栏对话/多列按钮）
+     * 强行打包合并为单条 Text.Line 的底层缺陷进行前置解耦拆分。
+     * 按照物理水平 X 坐标递增排序，若相邻 Text.Element 间距大于阈值（>= 14dp 或 1.3 倍字高），
+     * 坚决判定为并列分栏/列间距，切分为独立的 TextSegment，从源头消灭跨列“桥接包围盒”。
+     */
+    private fun splitLineIntoSegments(line: Text.Line, density: Float): List<TextSegment> {
+        val lineBox = line.boundingBox ?: return emptyList()
+        val elements = line.elements
+        if (elements.isEmpty()) {
+            return if (line.text.isNotBlank()) listOf(TextSegment(line.text.trim(), lineBox)) else emptyList()
+        }
+
+        val validElements = elements
+            .filter { it.text.isNotBlank() && it.boundingBox != null }
+            .sortedBy { it.boundingBox!!.left }
+
+        if (validElements.isEmpty()) {
+            return if (line.text.isNotBlank()) listOf(TextSegment(line.text.trim(), lineBox)) else emptyList()
+        }
+
+        val segments = mutableListOf<TextSegment>()
+        val currentElements = mutableListOf<Text.Element>()
+
+        fun flushCurrentSegment() {
+            if (currentElements.isEmpty()) return
+            var sLeft = Int.MAX_VALUE
+            var sTop = Int.MAX_VALUE
+            var sRight = Int.MIN_VALUE
+            var sBottom = Int.MIN_VALUE
+
+            val segText = buildString {
+                for (elem in currentElements) {
+                    val b = elem.boundingBox ?: continue
+                    sLeft = min(sLeft, b.left)
+                    sTop = min(sTop, b.top)
+                    sRight = max(sRight, b.right)
+                    sBottom = max(sBottom, b.bottom)
+
+                    val t = elem.text.trim()
+                    if (t.isNotEmpty()) {
+                        if (isNotEmpty()) {
+                            val lastChar = last()
+                            val firstChar = t.first()
+                            if (isEastAsianChar(lastChar) && isEastAsianChar(firstChar)) {
+                                // CJK 字符无缝拼接
+                            } else {
+                                append(" ")
+                            }
+                        }
+                        append(t)
+                    }
+                }
+            }.trim()
+
+            if (segText.isNotEmpty() && sLeft < sRight && sTop < sBottom) {
+                segments.add(TextSegment(segText, Rect(sLeft, sTop, sRight, sBottom)))
+            }
+            currentElements.clear()
+        }
+
+        for (elem in validElements) {
+            val currBox = elem.boundingBox ?: continue
+            if (currentElements.isEmpty()) {
+                currentElements.add(elem)
+            } else {
+                val prevBox = currentElements.last().boundingBox ?: continue
+                val gapX = currBox.left - prevBox.right
+                val elemHeight = maxOf(currBox.height(), prevBox.height(), 1)
+                val splitGapThreshold = maxOf(14f * density, elemHeight * 1.3f)
+
+                if (gapX > splitGapThreshold) {
+                    flushCurrentSegment()
+                }
+                currentElements.add(elem)
+            }
+        }
+        flushCurrentSegment()
+
+        return if (segments.isNotEmpty()) segments else listOf(TextSegment(line.text.trim(), lineBox))
+    }
+
     private suspend fun processRecognizer(recognizer: TextRecognizer, inputImage: InputImage): Text {
         return suspendCancellableCoroutine { continuation ->
             recognizer.process(inputImage)
@@ -135,31 +223,32 @@ class OcrHelper {
             }
         }
 
-        // 提取候选文字行
-        val rawLines = mutableListOf<Text.Line>()
+        // 提取候选文字行并进行行内分列解耦拆分（切断 ML Kit 同行基线强行拼接的两列）
+        val rawSegments = mutableListOf<TextSegment>()
         for (vt in visionTexts) {
             for (block in vt.textBlocks) {
                 for (line in block.lines) {
                     if (line.text.isNotBlank() && line.boundingBox != null) {
-                        rawLines.add(line)
+                        val segs = splitLineIntoSegments(line, density)
+                        rawSegments.addAll(segs)
                     }
                 }
             }
         }
 
-        if (rawLines.isEmpty()) {
+        if (rawSegments.isEmpty()) {
             return@coroutineScope emptyList()
         }
 
-        // 多引擎与候选行去重：消除空间重叠行 (IoU > 0.3 或包含度 > 0.4)
-        val validLines = mutableListOf<Text.Line>()
-        for (candidate in rawLines) {
-            val cBox = candidate.boundingBox ?: continue
+        // 多引擎与候选分段去重：消除空间重叠分段 (IoU > 0.3 或包含度 > 0.4)
+        val validSegments = mutableListOf<TextSegment>()
+        for (candidate in rawSegments) {
+            val cBox = candidate.boundingBox
             val cArea = cBox.width().toLong() * cBox.height()
             if (cArea <= 0) continue
 
-            val duplicateIndex = validLines.indexOfFirst { existing ->
-                val eBox = existing.boundingBox ?: return@indexOfFirst false
+            val duplicateIndex = validSegments.indexOfFirst { existing ->
+                val eBox = existing.boundingBox
                 val iLeft = max(cBox.left, eBox.left)
                 val iTop = max(cBox.top, eBox.top)
                 val iRight = min(cBox.right, eBox.right)
@@ -178,53 +267,63 @@ class OcrHelper {
             }
 
             if (duplicateIndex >= 0) {
-                // 空间重叠时，保留文本更完整或长度更长的有效行
-                if (candidate.text.trim().length > validLines[duplicateIndex].text.trim().length) {
-                    validLines[duplicateIndex] = candidate
+                // 空间重叠时，保留文本更完整或长度更长的有效分段
+                if (candidate.text.trim().length > validSegments[duplicateIndex].text.trim().length) {
+                    validSegments[duplicateIndex] = candidate
                 }
             } else {
-                validLines.add(candidate)
+                validSegments.add(candidate)
             }
         }
 
-        if (validLines.isEmpty()) {
+        if (validSegments.isEmpty()) {
             return@coroutineScope emptyList()
         }
 
-        val n = validLines.size
+        val n = validSegments.size
         val uf = UnionFind(n)
-        val hTolerancePx = horizontalOverlapToleranceDp * density
-        // 同行并列微距容差（约 4dp，仅容许微小字距，避免横向并列的不同按钮/列粘连）
-        val inlineWordGapTolerancePx = -4f * density
 
-        // 几何关系判定：
-        // 1. 垂直换行段落 (vDist > 0)：垂直间距 <= lineGapRatio * avgLineHeight 且 水平投影满足容差 (hOverlap > hTolerancePx)
-        // 2. 水平同行元素 (vDist == 0)：严格要求水平实际重叠或间距极小 (hOverlap > inlineWordGapTolerancePx)，防止粘连并排独立控件
+        // 几何关系聚类判定（核心双列/多列物理隔离数学模型）：
+        // 1. 垂直换行段落 (isVerticallyStacked)：
+        //    垂直净间距 <= avgLineHeight * lineGapRatio，且水平投影必须严格实质重叠 (hOverlap > 0 且 hOverlapRatio >= 0.35f)。
+        //    坚决彻底废弃原本的负重叠容差 (-20dp)，杜绝横向无重叠的两列通过垂直距离在并查集中产生传递性串联坍缩！
+        // 2. 水平同行元素 (!isVerticallyStacked)：
+        //    垂直方向必须基准对齐 (垂直重叠高度 / minHeight >= 0.5f)，且水平微间距 <= 0.6 * avgLineHeight，
+        //    仅允许正常微小词距拼合，严禁跨列横向桥接并排的两列内容。
         for (i in 0 until n) {
-            val boxA = validLines[i].boundingBox ?: continue
+            val boxA = validSegments[i].boundingBox
             val hA = max(1, boxA.height())
+            val wA = max(1, boxA.width())
             for (j in i + 1 until n) {
-                val boxB = validLines[j].boundingBox ?: continue
+                val boxB = validSegments[j].boundingBox
                 val hB = max(1, boxB.height())
+                val wB = max(1, boxB.width())
                 val avgLineHeight = (hA + hB) / 2f
+                val minWidth = min(wA, wB).toFloat()
+                val minHeight = min(hA, hB).toFloat()
 
-                // 垂直净距离
-                val isVerticallyStacked = boxA.bottom < boxB.top || boxB.bottom < boxA.top
+                // 垂直净距离与重叠判定
+                val isVerticallyStacked = boxA.bottom <= boxB.top || boxB.bottom <= boxA.top
                 val vDist = when {
                     boxA.bottom < boxB.top -> (boxB.top - boxA.bottom).toFloat()
                     boxB.bottom < boxA.top -> (boxA.top - boxB.bottom).toFloat()
-                    else -> 0f // 垂直方向存在重叠（同行或有高度交叉）
+                    else -> 0f
                 }
 
-                // 水平投影重叠量（小于0表示横向有间距）
+                // 水平投影重叠量与重叠比（以较窄行宽度为基准计算覆盖率）
                 val hOverlap = (min(boxA.right, boxB.right) - max(boxA.left, boxB.left)).toFloat()
+                val hOverlapRatio = if (minWidth > 0 && hOverlap > 0) hOverlap / minWidth else 0f
 
                 val shouldUnion = if (isVerticallyStacked) {
-                    // 上下换行段落：允许垂直间距在倍率内，且允许段落水平偏移容差（保证多行台词完整合并为单气泡）
-                    vDist <= avgLineHeight * lineGapRatio.coerceAtLeast(1.2f) && hOverlap > hTolerancePx
+                    // 上下换行段落：垂直距离在行距倍率内，且水平投影严格重叠并达到 35% 覆盖率
+                    val maxAllowedVDist = avgLineHeight * lineGapRatio.coerceAtLeast(1.2f)
+                    vDist <= maxAllowedVDist && hOverlap > 0 && hOverlapRatio >= 0.35f
                 } else {
-                    // 水平同行：仅在实际重叠或微小词距时合并，禁止使用跨度容差合并独立按钮
-                    hOverlap > inlineWordGapTolerancePx
+                    // 水平同行并列：垂直基准对齐（高度重叠 >= 50%），且水平间隙处于正常词距内
+                    val vOverlap = (min(boxA.bottom, boxB.bottom) - max(boxA.top, boxB.top)).toFloat()
+                    val isVerticallyAligned = (vOverlap / minHeight) >= 0.5f
+                    val hGap = (max(boxA.left, boxB.left) - min(boxA.right, boxB.right)).toFloat()
+                    isVerticallyAligned && (hGap <= avgLineHeight * 0.6f)
                 }
 
                 if (shouldUnion) {
@@ -234,24 +333,24 @@ class OcrHelper {
         }
 
         // 按连通分量汇聚分词
-        val clustersMap = mutableMapOf<Int, MutableList<Text.Line>>()
+        val clustersMap = mutableMapOf<Int, MutableList<TextSegment>>()
         for (i in 0 until n) {
             val root = uf.find(i)
-            clustersMap.getOrPut(root) { mutableListOf() }.add(validLines[i])
+            clustersMap.getOrPut(root) { mutableListOf() }.add(validSegments[i])
         }
 
         // 构建聚类文本块
         data class TempCluster(val text: String, val rect: Rect)
         val tempClusters = mutableListOf<TempCluster>()
 
-        for ((_, lines) in clustersMap) {
-            // 同一对话框内行按从上到下、从左到右排序拼接
-            lines.sortWith(compareBy({ it.boundingBox?.top ?: 0 }, { it.boundingBox?.left ?: 0 }))
+        for ((_, segments) in clustersMap) {
+            // 同一聚类内分段按从上到下、从左到右排序拼接
+            segments.sortWith(compareBy({ it.boundingBox.top }, { it.boundingBox.left }))
 
             // 智能语言拼接：东亚汉字/日文假名间不强行插入空格，避免破坏词法结构
             val mergedContent = buildString {
-                for (l in lines) {
-                    val t = l.text.trim()
+                for (seg in segments) {
+                    val t = seg.text.trim()
                     if (t.isEmpty()) continue
                     if (isNotEmpty()) {
                         val lastChar = last()
@@ -271,8 +370,8 @@ class OcrHelper {
             var right = Int.MIN_VALUE
             var bottom = Int.MIN_VALUE
 
-            for (l in lines) {
-                val b = l.boundingBox ?: continue
+            for (seg in segments) {
+                val b = seg.boundingBox
                 left = min(left, b.left)
                 top = min(top, b.top)
                 right = max(right, b.right)

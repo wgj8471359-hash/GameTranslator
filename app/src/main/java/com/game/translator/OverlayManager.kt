@@ -387,17 +387,12 @@ class OverlayManager(private val context: Context) {
                 windowManager.removeView(rootOverlayView)
             } catch (e: Exception) {
                 e.printStackTrace()
-            } finally {
-                rootOverlayView = null
-                bubbleViews.clear()
-                bubbleDataMap.clear()
-                isShowing = false
             }
-        } else {
-            bubbleViews.clear()
-            bubbleDataMap.clear()
-            isShowing = false
         }
+        rootOverlayView = null
+        bubbleViews.clear()
+        bubbleDataMap.clear()
+        isShowing = false
     }
 
     /**
