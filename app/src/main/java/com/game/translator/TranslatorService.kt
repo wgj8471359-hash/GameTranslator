@@ -331,9 +331,9 @@ class TranslatorService : Service() {
         val callback = object : MediaProjection.Callback() {
             override fun onStop() {
                 super.onStop()
-                releaseCaptureSession()
-                mediaProjection = null
-                stopSelf()
+                mainHandler.post {
+                    stopServiceInternal()
+                }
             }
         }
         proj.registerCallback(callback, mainHandler)
@@ -800,20 +800,7 @@ class TranslatorService : Service() {
             floatingBallView = null
         }
 
-        // 2. 关键修复：主动解除前台服务状态并彻底移除常驻通知
-        // 必须在 stopSelf 之前调用，否则 Android 系统会因为前台标志位而拦截服务的正常销毁！
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-            } else {
-                @Suppress("DEPRECATION")
-                stopForeground(true)
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        // 3. 中断进行中的翻译协程与 OCR 实例
+        // 2. 中断进行中的翻译协程与 OCR 实例
         try {
             cancelTranslation(notifyUser = false)
         } catch (e: Exception) {
@@ -826,14 +813,15 @@ class TranslatorService : Service() {
             e.printStackTrace()
         }
 
-        // 4. 彻底注销屏幕捕获会话（解绑监听、注销 Display、关闭 ImageReader）
+        // 3. 彻底注销屏幕捕获会话（解绑监听、注销 Display、关闭 ImageReader）
         try {
             releaseCaptureSession()
         } catch (e: Exception) {
             e.printStackTrace()
         }
 
-        // 5. 彻底向系统服务器发送停止媒体投影信号，通知系统关闭投屏状态
+        // 4. 【Android 14 关键时序修复】：必须在前台服务解除之前向系统服务器发送停止媒体投影信号！
+        // 保证 MediaProjectionManagerService 能在前台服务合法存续期内注销 Token，及时通知 SystemUI 清除状态栏共享胶囊
         try {
             mediaProjection?.stop()
         } catch (e: Exception) {
@@ -841,10 +829,31 @@ class TranslatorService : Service() {
         }
         mediaProjection = null
 
+        // 5. 投影正式关闭后，再解除前台服务状态并彻底移除通知栏
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
         serviceScope.cancel()
 
         // 6. 最终通知系统销毁本 Service 实例
         stopSelf()
+    }
+
+    /**
+     * 当用户在多任务列表（Recents）上滑划掉主程序卡片时触发：
+     * 联动彻底销毁截屏常驻服务与悬浮球，绝不在后台留下悬挂的录屏流与系统胶囊
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        stopServiceInternal()
     }
 
     override fun onDestroy() {

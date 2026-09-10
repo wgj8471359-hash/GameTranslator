@@ -218,7 +218,7 @@ class MainActivity : AppCompatActivity() {
             putFloat(KEY_LINE_GAP_RATIO, etLineGapRatio.text.toString().toFloatOrNull() ?: 1.2f)
             putInt(KEY_MIN_TEXT_LENGTH, etMinTextLength.text.toString().toIntOrNull() ?: 2)
             putFloat(KEY_HORIZONTAL_OVERLAP_TOLERANCE, etHorizontalOverlapTolerance.text.toString().toFloatOrNull() ?: -20f)
-            putInt(KEY_BUBBLE_ALPHA, (etBubbleAlpha.text.toString().toIntOrNull() ?: 85).coerceIn(20, 100))
+            putInt(KEY_BUBBLE_ALPHA, (etBubbleAlpha.text.toString().toIntOrNull() ?: 85).coerceIn(50, 100))
             putInt(KEY_BUBBLE_FONT_MIN_SP, etBubbleFontMinSp.text.toString().toIntOrNull() ?: 8)
             putInt(KEY_BUBBLE_FONT_MAX_SP, etBubbleFontMaxSp.text.toString().toIntOrNull() ?: 16)
             apply()

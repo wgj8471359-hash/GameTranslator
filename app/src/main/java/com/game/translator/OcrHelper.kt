@@ -347,21 +347,38 @@ class OcrHelper {
             // 同一聚类内分段按从上到下、从左到右排序拼接
             segments.sortWith(compareBy({ it.boundingBox.top }, { it.boundingBox.left }))
 
-            // 智能语言拼接：东亚汉字/日文假名间不强行插入空格，避免破坏词法结构
+            // 智能语言与多行结构拼接：
+            // 同行并列词元保持空格或 CJK 无缝连接；换行行严格保留 \n 换行符，
+            // 确保大模型能天然感知多行条目并生成对应分行，彻底根绝列表符号窜入上一行行尾的问题
             val mergedContent = buildString {
+                var prevBox: Rect? = null
                 for (seg in segments) {
                     val t = seg.text.trim()
                     if (t.isEmpty()) continue
+                    val currBox = seg.boundingBox
+
                     if (isNotEmpty()) {
-                        val lastChar = last()
-                        val firstChar = t.first()
-                        if (isEastAsianChar(lastChar) && isEastAsianChar(firstChar)) {
-                            // CJK 无缝连接
+                        val minH = if (prevBox != null) min(max(1, prevBox!!.height()), max(1, currBox.height())) else max(1, currBox.height())
+                        val verticalShift = if (prevBox != null) currBox.top - prevBox!!.top else 0
+                        val verticalOverlap = if (prevBox != null) min(prevBox!!.bottom, currBox.bottom) - max(prevBox!!.top, currBox.top) else 0
+
+                        // 换行判定：垂直重叠高度较低（< 45% 字高）或垂直基线明显下移（> 50% 字高）
+                        val isNewLine = prevBox != null && (verticalOverlap < 0.45f * minH || verticalShift > 0.5f * minH)
+
+                        if (isNewLine) {
+                            append("\n")
                         } else {
-                            append(" ")
+                            val lastChar = last()
+                            val firstChar = t.first()
+                            if (isEastAsianChar(lastChar) && isEastAsianChar(firstChar)) {
+                                // CJK 同行无缝连接
+                            } else {
+                                append(" ")
+                            }
                         }
                     }
                     append(t)
+                    prevBox = currBox
                 }
             }.trim()
 
