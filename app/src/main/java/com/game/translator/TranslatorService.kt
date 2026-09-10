@@ -140,7 +140,7 @@ class TranslatorService : Service() {
                 initFloatingBall()
             }
             ACTION_STOP_SERVICE -> {
-                stopSelf()
+                stopServiceInternal()
             }
         }
         return START_NOT_STICKY
@@ -171,11 +171,22 @@ class TranslatorService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val stopIntent = Intent(this, TranslatorService::class.java).apply {
+            action = ACTION_STOP_SERVICE
+        }
+        val stopPendingIntent = PendingIntent.getService(
+            this,
+            1002,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.service_notification_title))
             .setContentText(getString(R.string.service_notification_text))
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentIntent(pendingIntent)
+            .addAction(R.drawable.ic_launcher, getString(R.string.btn_stop_service), stopPendingIntent)
             .setOngoing(true)
             .build()
 
@@ -768,11 +779,18 @@ class TranslatorService : Service() {
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
+    /**
+     * 彻底停止服务并完整释放所有前台通知、常驻屏幕流与媒体投影资源
+     */
+    private fun stopServiceInternal() {
+        if (!isRunning && mediaProjection == null && floatingBallView == null) {
+            stopSelf()
+            return
+        }
         isRunning = false
         pendingSingleClickRunnable?.let { mainHandler.removeCallbacks(it) }
 
+        // 1. 立即从 WindowManager 中移除悬浮球
         if (floatingBallView != null) {
             try {
                 windowManager.removeView(floatingBallView)
@@ -782,7 +800,8 @@ class TranslatorService : Service() {
             floatingBallView = null
         }
 
-        // 停止前台服务并移除通知，确保系统服务状态同步清退
+        // 2. 关键修复：主动解除前台服务状态并彻底移除常驻通知
+        // 必须在 stopSelf 之前调用，否则 Android 系统会因为前台标志位而拦截服务的正常销毁！
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
@@ -794,6 +813,7 @@ class TranslatorService : Service() {
             e.printStackTrace()
         }
 
+        // 3. 中断进行中的翻译协程与 OCR 实例
         try {
             cancelTranslation(notifyUser = false)
         } catch (e: Exception) {
@@ -806,12 +826,14 @@ class TranslatorService : Service() {
             e.printStackTrace()
         }
 
+        // 4. 彻底注销屏幕捕获会话（解绑监听、注销 Display、关闭 ImageReader）
         try {
             releaseCaptureSession()
         } catch (e: Exception) {
             e.printStackTrace()
         }
 
+        // 5. 彻底向系统服务器发送停止媒体投影信号，通知系统关闭投屏状态
         try {
             mediaProjection?.stop()
         } catch (e: Exception) {
@@ -820,5 +842,13 @@ class TranslatorService : Service() {
         mediaProjection = null
 
         serviceScope.cancel()
+
+        // 6. 最终通知系统销毁本 Service 实例
+        stopSelf()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopServiceInternal()
     }
 }
