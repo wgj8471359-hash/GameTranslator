@@ -97,6 +97,7 @@ class TranslatorService : Service() {
 
     // 并发防重入锁
     private val isTranslating = AtomicBoolean(false)
+    private val isCancelling = AtomicBoolean(false)
 
     override fun onCreate() {
         super.onCreate()
@@ -107,8 +108,8 @@ class TranslatorService : Service() {
         ocrHelper = OcrHelper()
         hyMtClient = HyMtClient()
         overlayManager = OverlayManager(this).apply {
-            onDismissListener = {
-                // 用户点击空白区域关闭气泡时，立即终止后台还在进行的流式翻译与网络请求
+            onUserDismissListener = {
+                // 仅当用户手动轻触空白区域关闭气泡时，立即终止后台还在进行的流式翻译与网络请求
                 cancelTranslation(notifyUser = false)
             }
         }
@@ -510,14 +511,19 @@ class TranslatorService : Service() {
      * 立即取消正在执行的截屏与流式翻译任务，释放所有网络连接与协程资源
      */
     private fun cancelTranslation(notifyUser: Boolean = false) {
-        currentTranslationJob?.cancel()
-        currentTranslationJob = null
-        hyMtClient.cancelAll()
-        overlayManager.dismiss()
-        floatingBallView?.visibility = View.VISIBLE
-        isTranslating.set(false)
-        if (notifyUser) {
-            Toast.makeText(this, R.string.toast_translation_cancelled, Toast.LENGTH_SHORT).show()
+        if (!isCancelling.compareAndSet(false, true)) return
+        try {
+            currentTranslationJob?.cancel()
+            currentTranslationJob = null
+            hyMtClient.cancelAll()
+            overlayManager.dismiss()
+            floatingBallView?.visibility = View.VISIBLE
+            isTranslating.set(false)
+            if (notifyUser) {
+                Toast.makeText(this, R.string.toast_translation_cancelled, Toast.LENGTH_SHORT).show()
+            }
+        } finally {
+            isCancelling.set(false)
         }
     }
 
@@ -604,17 +610,20 @@ class TranslatorService : Service() {
                 val ocrLanguage = prefs.getString(MainActivity.KEY_OCR_LANGUAGE, OcrHelper.LANG_AUTO) ?: OcrHelper.LANG_AUTO
 
                 // 4. Google ML Kit 本地离线 OCR 识别与并查集几何聚类（支持中日韩英全语种）
-                val clusters = ocrHelper.recognizeAndCluster(
-                    bitmap = bitmap,
-                    ocrLanguage = ocrLanguage,
-                    lineGapRatio = lineGapRatio,
-                    minTextLength = minTextLength,
-                    horizontalOverlapToleranceDp = horizontalOverlapToleranceDp,
-                    density = density
-                )
                 val bmpWidth = bitmap.width
                 val bmpHeight = bitmap.height
-                bitmap.recycle()
+                val clusters = try {
+                    ocrHelper.recognizeAndCluster(
+                        bitmap = bitmap,
+                        ocrLanguage = ocrLanguage,
+                        lineGapRatio = lineGapRatio,
+                        minTextLength = minTextLength,
+                        horizontalOverlapToleranceDp = horizontalOverlapToleranceDp,
+                        density = density
+                    )
+                } finally {
+                    bitmap.recycle()
+                }
 
                 if (clusters.isEmpty()) {
                     Toast.makeText(this@TranslatorService, R.string.toast_no_text_detected, Toast.LENGTH_SHORT).show()
@@ -773,11 +782,43 @@ class TranslatorService : Service() {
             floatingBallView = null
         }
 
-        cancelTranslation(notifyUser = false)
-        ocrHelper.release()
-        releaseCaptureSession()
-        mediaProjection?.stop()
+        // 停止前台服务并移除通知，确保系统服务状态同步清退
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        try {
+            cancelTranslation(notifyUser = false)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        try {
+            ocrHelper.release()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        try {
+            releaseCaptureSession()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        try {
+            mediaProjection?.stop()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         mediaProjection = null
+
         serviceScope.cancel()
     }
 }

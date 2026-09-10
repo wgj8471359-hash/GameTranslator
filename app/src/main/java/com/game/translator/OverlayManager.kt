@@ -51,7 +51,11 @@ class OverlayManager(private val context: Context) {
     )
     private val bubbleDataMap = mutableMapOf<Int, BubbleLayoutInfo>()
 
-    var onDismissListener: (() -> Unit)? = null
+    /**
+     * 仅当用户手动轻触全屏空白背景清除气泡时触发（用于终止后台仍在进行的网络请求）
+     * 严禁在内部调用 dismiss() 时触发，防止陷入递归循环与误取消。
+     */
+    var onUserDismissListener: (() -> Unit)? = null
 
     private var currentConfig: OverlayConfig = OverlayConfig()
     private var currentScreenWidth = 0
@@ -76,9 +80,10 @@ class OverlayManager(private val context: Context) {
         if (isShowing && rootOverlayView != null) return
 
         val rootView = FrameLayout(context).apply {
-            // 点击屏幕空白任意区域清除气泡，不阻挡游戏后续操作
+            // 用户点击屏幕空白任意区域清除气泡，同时触发用户主动关闭回调
             setOnClickListener {
                 dismiss()
+                onUserDismissListener?.invoke()
             }
         }
 
@@ -387,13 +392,11 @@ class OverlayManager(private val context: Context) {
                 bubbleViews.clear()
                 bubbleDataMap.clear()
                 isShowing = false
-                onDismissListener?.invoke()
             }
         } else {
             bubbleViews.clear()
             bubbleDataMap.clear()
             isShowing = false
-            onDismissListener?.invoke()
         }
     }
 
