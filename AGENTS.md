@@ -65,7 +65,7 @@ When generating, modifying, or reviewing Android code in this repository, the fo
 
 ## 4. Key Repository Files
 
-* [`.github/workflows/build-apk.yml`](file:///e:/workspace/GameTranslator/.github/workflows/build-apk.yml): GitHub Actions workflow. Automatically builds and signs a test APK using an on-the-fly generated keystore (`apksigner` V1+V2+V3) and uploads it as an artifact. Uses `gradle/actions/setup-gradle@v3` to eliminate binary wrapper jar requirements.
+* [`.github/workflows/build-apk.yml`](file:///e:/workspace/GameTranslator/.github/workflows/build-apk.yml): GitHub Actions workflow. Automatically builds and signs a test APK using the repository permanent keystore (`signing/release.jks`, `apksigner` V1+V2+V3) and uploads it as an artifact. Uses `gradle/actions/setup-gradle@v3` to eliminate binary wrapper jar requirements.
 * [`PROMPT.md`](file:///e:/workspace/GameTranslator/PROMPT.md): Ready-to-use Master Prompt to feed into code-generation models for complete project generation.
 * [`安卓端本地离线截屏翻译方案.json`](file:///e:/workspace/GameTranslator/安卓端本地离线截屏翻译方案.json): Original PRD and architectural blueprint discussion.
 * [`方案补充.txt`](file:///e:/workspace/GameTranslator/方案补充.txt): Evaluation and risk mitigation discussion.
@@ -82,8 +82,8 @@ Since the project is designed for zero-local-setup development:
    git commit -m "feat: implement game translator app"
    git push origin main
    ```
-2. GitHub Actions will trigger automatically, build debug & release targets, generate a temporary signing keystore, sign the APK with `apksigner`, and upload `GameTranslator-Signed-Test-APK`.
-3. Download the artifact from the GitHub Actions run summary page, unpack, and install on the phone.
+2. GitHub Actions will trigger automatically, build debug & release targets, sign the APK with the permanent keystore using `apksigner` (V1+V2+V3), and upload `GameTranslator-Signed-Test-APK`.
+3. Download the artifact from the GitHub Actions run summary page, unpack, and install on the phone. Seamless overwrite update is supported without uninstalling.
 
 ### 5.2 Local Build (If Android SDK & JDK 17 are installed on Windows)
 ```powershell
