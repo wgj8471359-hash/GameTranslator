@@ -402,7 +402,33 @@ class OverlayManager(private val context: Context) {
             }
         }
 
-        // 2. 原地更新内容发生变动的已有气泡（若模型尚在生成，保持现有内容避免闪现原文）
+        // 2. 原地平移滚动气泡 (moved)：更新 LayoutParams 并触发布局，平滑跟随网页/条漫滚动
+        for (item in diffResult.moved) {
+            val existing = bubbleViews[item.id]
+            val box = item.boundingBox
+            val scaledLeft = (box.left * currentScaleX).toInt()
+            val scaledTop = (box.top * currentScaleY).toInt()
+            val left = scaledLeft.coerceIn(0, (currentScreenWidth - (30 * currentDensity).toInt()).coerceAtLeast(0))
+            val top = scaledTop.coerceIn(0, (currentScreenHeight - (20 * currentDensity).toInt()).coerceAtLeast(0))
+
+            if (existing != null) {
+                val lp = existing.layoutParams as? FrameLayout.LayoutParams
+                if (lp != null && (lp.leftMargin != left || lp.topMargin != top)) {
+                    lp.leftMargin = left
+                    lp.topMargin = top
+                    existing.layoutParams = lp
+                    existing.requestLayout()
+                }
+                bubbleDataMap[item.id]?.let {
+                    it.left = left
+                    it.top = top
+                }
+            } else {
+                showOrUpdateBubbleInternal(item, config, isFinished = true)
+            }
+        }
+
+        // 3. 原地更新内容发生变动的已有气泡（若模型尚在生成，保持现有内容避免闪现原文）
         for (item in diffResult.updated) {
             val cachedText = diffResult.cachedMap[item.id]
             if (cachedText != null) {

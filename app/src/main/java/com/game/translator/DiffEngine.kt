@@ -2,6 +2,7 @@ package com.game.translator
 
 import android.graphics.Rect
 import android.util.LruCache
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -10,6 +11,7 @@ import kotlin.math.min
  */
 data class DiffResult(
     val unchanged: List<ClusteredText>,               // 几何与文本均无显著变化的簇（保持当前气泡）
+    val moved: List<ClusteredText>,                   // 内容未变但发生了空间平移（如网页/漫画滚动）的簇（原地平移更新坐标）
     val updated: List<ClusteredText>,                 // 几何重合但文本发生变化的簇（更新气泡内容）
     val added: List<ClusteredText>,                   // 当前帧新出现的簇（创建新气泡）
     val removedIds: List<Int>,                        // 上一帧存在但当前帧消失的簇 ID（移除气泡）
@@ -17,7 +19,7 @@ data class DiffResult(
     val needModelTranslation: List<ClusteredText>     // 剔除命中缓存后，真正需要请求大模型翻译的簇
 ) {
     val hasVisualChanges: Boolean
-        get() = updated.isNotEmpty() || added.isNotEmpty() || removedIds.isNotEmpty()
+        get() = moved.isNotEmpty() || updated.isNotEmpty() || added.isNotEmpty() || removedIds.isNotEmpty()
 }
 
 /**
@@ -179,11 +181,13 @@ class DiffEngine(
         currentTime: Long = System.currentTimeMillis()
     ): DiffResult {
         val unchanged = mutableListOf<ClusteredText>()
+        val moved = mutableListOf<ClusteredText>()
         val updated = mutableListOf<ClusteredText>()
         val added = mutableListOf<ClusteredText>()
         val matchedTrackedIds = mutableSetOf<Int>()
+        val unmatchedCurrent = mutableListOf<ClusteredText>()
 
-        // 1. 匹配当前帧与上一帧已建立追踪的文本簇
+        // 阶段 1：静态高 IoU 空间匹配与自截屏二次识别阻断
         for (curr in currentClusters) {
             var bestMatch: TrackedCluster? = null
             var bestIoU = 0f
@@ -199,23 +203,42 @@ class DiffEngine(
 
             if (bestMatch != null) {
                 matchedTrackedIds.add(bestMatch.id)
-                val similarity = calculateSimilarity(curr.originalText, bestMatch.originalText)
 
+                // 核心防线 1：自截屏污染阻断 (Self-Capture OCR Poisoning Filter)
+                // 若当前 OCR 识别到的文本，与该气泡已展示的译文高度吻合，
+                // 说明是截屏捕获到了自身悬浮气泡中的中文译文，绝不是新的外文输入！
+                val isSelfBubbleCaptured = bestMatch.translatedText != null &&
+                        (calculateSimilarity(curr.originalText, bestMatch.translatedText!!) >= 0.60f ||
+                         (curr.originalText.trim().length >= 3 && bestMatch.translatedText!!.contains(curr.originalText.trim())))
+
+                if (isSelfBubbleCaptured) {
+                    bestMatch.boundingBox = curr.boundingBox
+                    unchanged.add(
+                        ClusteredText(
+                            id = bestMatch.id,
+                            originalText = bestMatch.originalText,
+                            translatedText = bestMatch.translatedText,
+                            boundingBox = curr.boundingBox
+                        )
+                    )
+                    continue
+                }
+
+                val similarity = calculateSimilarity(curr.originalText, bestMatch.originalText)
                 if (similarity >= similarityThreshold) {
                     // 内容几何与文本高度吻合
                     bestMatch.boundingBox = curr.boundingBox
                     if (bestMatch.isDisplayed) {
-                        // 已经在屏幕上呈现：报告为不变项（Overlay 维持现状零重绘）
                         unchanged.add(
                             ClusteredText(
                                 id = bestMatch.id,
-                                originalText = curr.originalText,
+                                originalText = bestMatch.originalText,
                                 translatedText = bestMatch.translatedText,
                                 boundingBox = curr.boundingBox
                             )
                         )
                     } else {
-                        // 之前处于新增消抖窗口中，检查是否已经稳定
+                        // 处于新增消抖窗口中，检查是否已经稳定
                         val elapsed = currentTime - bestMatch.firstSeenTime
                         if (elapsed >= debounceWindowMs) {
                             bestMatch.isStable = true
@@ -237,9 +260,7 @@ class DiffEngine(
                         bestMatch.boundingBox = curr.boundingBox
                         bestMatch.firstSeenTime = currentTime
                         bestMatch.isStable = false
-                        // 文字仍在持续输入变化中，暂缓发射更新请求，维持旧气泡不闪烁
                     } else {
-                        // 变化后的新文本在连续采样中保持一致，检查是否满足消抖窗口
                         val elapsed = currentTime - bestMatch.firstSeenTime
                         if (elapsed >= debounceWindowMs) {
                             bestMatch.isStable = true
@@ -256,23 +277,90 @@ class DiffEngine(
                     }
                 }
             } else {
-                // 全新文本框（尚未被追踪），分配新的持久化递增 ID
-                val newId = nextClusterId++
-                val newTracked = TrackedCluster(
-                    id = newId,
-                    originalText = curr.originalText,
-                    translatedText = null,
-                    boundingBox = curr.boundingBox,
-                    firstSeenTime = currentTime,
-                    isStable = false,
-                    isDisplayed = false
-                )
-                trackedMap[newId] = newTracked
-                matchedTrackedIds.add(newId)
+                unmatchedCurrent.add(curr)
             }
         }
 
-        // 2. 判定消失的气泡（仅移除此前已经呈现在屏幕上的项）
+        // 阶段 2：运动学平移跟踪 (Kinematic Translation Tracker for Webpage/Manga Scrolling)
+        // 针对阶段 1 未通过静态 IoU 匹配的文本，按文本高相似度与水平对齐寻找发生垂直平移的存量气泡
+        val stillUnmatchedCurrent = mutableListOf<ClusteredText>()
+        for (curr in unmatchedCurrent) {
+            var kinematicMatch: TrackedCluster? = null
+            var bestSim = 0f
+
+            for ((_, tracked) in trackedMap) {
+                if (matchedTrackedIds.contains(tracked.id)) continue
+
+                // 检查是否文本一致（原外文一致，或者截屏读出的是已知译文）
+                val simOriginal = calculateSimilarity(curr.originalText, tracked.originalText)
+                val simTrans = if (tracked.translatedText != null) {
+                    calculateSimilarity(curr.originalText, tracked.translatedText!!)
+                } else 0f
+                val effectiveSim = max(simOriginal, simTrans)
+
+                // 水平 X 坐标偏差与宽度变化在合理阈值内（页面主要发生 Y 轴上下滚动）
+                val hDist = abs(curr.boundingBox.left - tracked.boundingBox.left)
+                val wDist = abs(curr.boundingBox.width() - tracked.boundingBox.width())
+                val isHorizontallyAligned = hDist <= max(40, (tracked.boundingBox.width() * 0.35f).toInt()) &&
+                        wDist <= max(50, (tracked.boundingBox.width() * 0.40f).toInt())
+
+                if (effectiveSim >= 0.85f && isHorizontallyAligned && effectiveSim > bestSim) {
+                    bestSim = effectiveSim
+                    kinematicMatch = tracked
+                }
+            }
+
+            if (kinematicMatch != null) {
+                matchedTrackedIds.add(kinematicMatch.id)
+                kinematicMatch.boundingBox = curr.boundingBox
+
+                if (kinematicMatch.isDisplayed) {
+                    // 已在屏幕上：分发 moved 状态，指令 Overlay 原地平移，绝不销毁重建，零延迟零闪烁
+                    moved.add(
+                        ClusteredText(
+                            id = kinematicMatch.id,
+                            originalText = kinematicMatch.originalText,
+                            translatedText = kinematicMatch.translatedText,
+                            boundingBox = curr.boundingBox
+                        )
+                    )
+                } else {
+                    val elapsed = currentTime - kinematicMatch.firstSeenTime
+                    if (elapsed >= debounceWindowMs) {
+                        kinematicMatch.isStable = true
+                        kinematicMatch.isDisplayed = true
+                        added.add(
+                            ClusteredText(
+                                id = kinematicMatch.id,
+                                originalText = kinematicMatch.originalText,
+                                translatedText = kinematicMatch.translatedText,
+                                boundingBox = curr.boundingBox
+                            )
+                        )
+                    }
+                }
+            } else {
+                stillUnmatchedCurrent.add(curr)
+            }
+        }
+
+        // 阶段 3：真正全新的文本簇（分配新 ID）
+        for (curr in stillUnmatchedCurrent) {
+            val newId = nextClusterId++
+            val newTracked = TrackedCluster(
+                id = newId,
+                originalText = curr.originalText,
+                translatedText = null,
+                boundingBox = curr.boundingBox,
+                firstSeenTime = currentTime,
+                isStable = false,
+                isDisplayed = false
+            )
+            trackedMap[newId] = newTracked
+            matchedTrackedIds.add(newId)
+        }
+
+        // 阶段 4：判定真正消失的气泡（完全划出屏幕或被覆盖）
         val removedIds = mutableListOf<Int>()
         val iterator = trackedMap.iterator()
         while (iterator.hasNext()) {
@@ -286,7 +374,7 @@ class DiffEngine(
             }
         }
 
-        // 3. 查询 LRU 翻译缓存与提取待翻译项
+        // 阶段 5：查询 LRU 翻译缓存与提取待翻译项
         val cachedMap = mutableMapOf<Int, String>()
         val needModel = mutableListOf<ClusteredText>()
 
@@ -303,6 +391,7 @@ class DiffEngine(
 
         return DiffResult(
             unchanged = unchanged,
+            moved = moved,
             updated = updated,
             added = added,
             removedIds = removedIds,

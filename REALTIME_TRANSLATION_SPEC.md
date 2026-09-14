@@ -82,3 +82,7 @@ data class StabilizingEntry(
   - [x] 建立 `values/colors.xml`（浅色 Notion 白昼）与 `values-night/colors.xml`（深色 Linear 纯暗），彻底消除硬编码色值。
   - [x] 重构 `themes.xml` 实现 `android:windowLightStatusBar = ?attr/isLightTheme`，根治系统状态栏/导航栏颜色泄露。
   - [x] 重构 `activity_main.xml` 严格落实 4/6/8 圆角、24/32 留白与分组排版，100% 保留全部 27 个视图 ID 与现有业务绑定。
+- [x] **Phase 6: 自截屏污染阻断与运动学平移跟踪 (Self-Capture & Kinematic Scrolling Fix)**
+  - [x] 在 `DiffEngine.kt` 中实现已呈现译文反查过滤（Self-Capture Filter），彻底阻断递归翻译与缓存击穿。
+  - [x] 在 `DiffEngine.kt` 中实现第二阶段运动学平移匹配，分发 `moved` 状态；在 `OverlayManager.kt` 中原地刷新 `LayoutParams` 消除网页滑动断层。
+  - [x] 在 `TranslatorService.kt` 中引入 `currentEpoch` 世代时序令牌防范大模型网络延迟导致的过期翻译覆盖，并在横竖屏旋转时重置引擎。

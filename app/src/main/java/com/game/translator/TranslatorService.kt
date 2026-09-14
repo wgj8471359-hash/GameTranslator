@@ -47,6 +47,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 import kotlin.math.abs
 
@@ -91,6 +92,9 @@ class TranslatorService : Service() {
     private var cachedRawBitmap: Bitmap? = null
     private var cachedCroppedBitmap: Bitmap? = null
     private val bitmapBufferLock = Any()
+
+    // 世代时序令牌（防范大模型网络延迟导致的过期翻译覆盖新视口）
+    private val currentEpoch = AtomicLong(0)
 
     // 常驻屏幕捕获管道（规避 Android 14 单次令牌安全限制）
     private var virtualDisplay: VirtualDisplay? = null
@@ -386,6 +390,10 @@ class TranslatorService : Service() {
             currentHeight = metrics.height
             currentDpi = metrics.densityDpi
 
+            currentEpoch.incrementAndGet()
+            diffEngine.reset()
+            overlayManager.dismiss()
+
             synchronized(bitmapBufferLock) {
                 cachedRawBitmap?.recycle()
                 cachedRawBitmap = null
@@ -601,6 +609,7 @@ class TranslatorService : Service() {
      */
     private fun stopRealtimeMode() {
         if (isRealtimeActive.compareAndSet(true, false)) {
+            currentEpoch.incrementAndGet()
             realtimeJob?.cancel()
             realtimeJob = null
             diffEngine.reset()
@@ -692,9 +701,11 @@ class TranslatorService : Service() {
                         idleRounds = 0
                         val translationConfig = getTranslationConfig(prefs)
                         val streamMode = translationConfig.streamMode
+                        val requestEpoch = currentEpoch.get()
 
                         val result = hyMtClient.translateStream(diffResult.needModelTranslation, translationConfig) { clusterId, text, isFinished ->
                             if (streamMode) {
+                                if (requestEpoch != currentEpoch.get() || !isRealtimeActive.get()) return@translateStream
                                 val target = diffResult.needModelTranslation.find { it.id == clusterId }
                                 if (target != null) {
                                     target.translatedText = text
@@ -704,6 +715,7 @@ class TranslatorService : Service() {
                         }
 
                         result.onSuccess { translatedList ->
+                            if (requestEpoch != currentEpoch.get() || !isRealtimeActive.get()) return@onSuccess
                             for (item in translatedList) {
                                 if (item.translatedText != null) {
                                     diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!)
@@ -795,6 +807,7 @@ class TranslatorService : Service() {
             val clickRunnable = Runnable {
                 if (isRealtimeActive.get()) {
                     // 实时监听模式下单次点击：重置差分快照强制执行一次视口重新捕获
+                    currentEpoch.incrementAndGet()
                     diffEngine.reset()
                     Toast.makeText(this@TranslatorService, "实时视口已刷新", Toast.LENGTH_SHORT).show()
                 } else {
