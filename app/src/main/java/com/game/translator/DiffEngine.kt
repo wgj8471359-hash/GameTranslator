@@ -83,6 +83,14 @@ class DiffEngine(
     }
 
     /**
+     * 判断指定 Cluster ID 当前是否仍活跃在追踪表中（未滑出屏幕且未被移除）
+     */
+    @Synchronized
+    fun isClusterActive(id: Int): Boolean {
+        return trackedMap.containsKey(id)
+    }
+
+    /**
      * 将翻译结果存入 LRU 缓存并同步更新当前追踪项
      */
     @Synchronized

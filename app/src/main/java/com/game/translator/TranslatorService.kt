@@ -46,6 +46,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
@@ -96,6 +97,8 @@ class TranslatorService : Service() {
 
     // 世代时序令牌（防范大模型网络延迟导致的过期翻译覆盖新视口）
     private val currentEpoch = AtomicLong(0)
+    // 实时监听中正在并发请求中的 Cluster ID 集合（防止网络延迟期间重复触发请求）
+    private val inFlightRealtimeClusterIds = Collections.synchronizedSet(mutableSetOf<Int>())
 
     // 常驻屏幕捕获管道（规避 Android 14 单次令牌安全限制）
     private var virtualDisplay: VirtualDisplay? = null
@@ -404,6 +407,7 @@ class TranslatorService : Service() {
             currentDpi = metrics.densityDpi
 
             currentEpoch.incrementAndGet()
+            inFlightRealtimeClusterIds.clear()
             diffEngine.reset()
             overlayManager.dismiss()
 
@@ -610,6 +614,9 @@ class TranslatorService : Service() {
         }
 
         if (isRealtimeActive.compareAndSet(false, true)) {
+            // 切入实时模式前，立即取消任何可能仍在进行的单次手动翻译与网络请求
+            cancelTranslation(notifyUser = false)
+            inFlightRealtimeClusterIds.clear()
             isRealtimePassthrough = true
             // 视觉反馈：悬浮球着色标明进入实时监听态（默认沉浸穿透）
             floatingBallView?.setColorFilter(android.graphics.Color.parseColor("#6366F1"))
@@ -624,6 +631,7 @@ class TranslatorService : Service() {
     private fun stopRealtimeMode() {
         if (isRealtimeActive.compareAndSet(true, false)) {
             currentEpoch.incrementAndGet()
+            inFlightRealtimeClusterIds.clear()
             realtimeJob?.cancel()
             realtimeJob = null
             diffEngine.reset()
@@ -712,34 +720,51 @@ class TranslatorService : Service() {
                         overlayManager.applyDiffResult(diffResult, overlayConfig)
                     }
 
-                    // 增量请求大模型（仅处理未命中缓存且已稳定的文本）
-                    if (diffResult.needModelTranslation.isNotEmpty()) {
+                    // 增量请求大模型（仅处理未命中缓存、处于活跃追踪且未在请求中的稳定文本）
+                    val toTranslate = diffResult.needModelTranslation.filter {
+                        !inFlightRealtimeClusterIds.contains(it.id) && diffEngine.isClusterActive(it.id)
+                    }
+
+                    if (toTranslate.isNotEmpty()) {
                         idleRounds = 0
+                        inFlightRealtimeClusterIds.addAll(toTranslate.map { it.id })
                         val translationConfig = getTranslationConfig(prefs)
                         val streamMode = translationConfig.streamMode
                         val requestEpoch = currentEpoch.get()
 
-                        val result = hyMtClient.translateStream(diffResult.needModelTranslation, translationConfig) { clusterId, text, isFinished ->
-                            if (requestEpoch != currentEpoch.get() || !isRealtimeActive.get()) return@translateStream
-                            val target = diffResult.needModelTranslation.find { it.id == clusterId }
-                            if (target != null) {
-                                target.translatedText = text
-                                if (streamMode) {
-                                    overlayManager.showOrUpdateBubble(target, overlayConfig, isFinished)
+                        // 核心并发解耦：大模型网络请求异步派发，绝不阻塞当前帧循环！
+                        // 确保手指持续滑动网页或操作游戏时，当前循环保持 1.2s 频率即时计算 moved 并平滑跟手！
+                        serviceScope.launch {
+                            try {
+                                val result = hyMtClient.translateStream(toTranslate, translationConfig) { clusterId, text, isFinished ->
+                                    if (requestEpoch != currentEpoch.get() || !isRealtimeActive.get()) return@translateStream
+                                    if (!diffEngine.isClusterActive(clusterId)) return@translateStream
+                                    val target = toTranslate.find { it.id == clusterId }
+                                    if (target != null) {
+                                        target.translatedText = text
+                                        if (streamMode) {
+                                            overlayManager.showOrUpdateBubble(target, overlayConfig, isFinished)
+                                        }
+                                        if (isFinished) {
+                                            diffEngine.putCache(ocrLanguage, target.originalText, text)
+                                            inFlightRealtimeClusterIds.remove(clusterId)
+                                        }
+                                    }
                                 }
-                                if (isFinished) {
-                                    diffEngine.putCache(ocrLanguage, target.originalText, text)
-                                }
-                            }
-                        }
 
-                        result.onSuccess { translatedList ->
-                            if (requestEpoch != currentEpoch.get() || !isRealtimeActive.get()) return@onSuccess
-                            for (item in translatedList) {
-                                if (item.translatedText != null) {
-                                    diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!)
-                                    overlayManager.showOrUpdateBubble(item, overlayConfig, isFinished = true)
+                                result.onSuccess { translatedList ->
+                                    if (requestEpoch != currentEpoch.get() || !isRealtimeActive.get()) return@onSuccess
+                                    for (item in translatedList) {
+                                        if (item.translatedText != null) {
+                                            diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!)
+                                            if (diffEngine.isClusterActive(item.id)) {
+                                                overlayManager.showOrUpdateBubble(item, overlayConfig, isFinished = true)
+                                            }
+                                        }
+                                    }
                                 }
+                            } finally {
+                                inFlightRealtimeClusterIds.removeAll(toTranslate.map { it.id }.toSet())
                             }
                         }
                     } else {
@@ -963,7 +988,9 @@ class TranslatorService : Service() {
                 }
 
                 // 6. 仅对未命中缓存的增量文本请求本地/局域网大模型
+                val requestEpoch = currentEpoch.get()
                 val result = hyMtClient.translateStream(needModelClusters, config) { clusterId, text, isFinished ->
+                    if (requestEpoch != currentEpoch.get() || !isTranslating.get()) return@translateStream
                     val cluster = needModelClusters.find { it.id == clusterId }
                     if (cluster != null) {
                         cluster.translatedText = text
@@ -977,6 +1004,7 @@ class TranslatorService : Service() {
                 }
 
                 result.onSuccess { translatedClusters ->
+                    if (requestEpoch != currentEpoch.get() || !isTranslating.get()) return@onSuccess
                     for (item in translatedClusters) {
                         if (item.translatedText != null) {
                             diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!)
