@@ -34,7 +34,8 @@ class OverlayManager(private val context: Context) {
         val minFontSp: Int = 8,
         val maxFontSp: Int = 16,
         val sourceImageWidth: Int = 0,
-        val sourceImageHeight: Int = 0
+        val sourceImageHeight: Int = 0,
+        val isRealtimeMode: Boolean = false
     )
 
     private var rootOverlayView: FrameLayout? = null
@@ -57,7 +58,18 @@ class OverlayManager(private val context: Context) {
      */
     var onUserDismissListener: (() -> Unit)? = null
 
+    /**
+     * 用户长按单个气泡触发重新翻译该句的回调
+     */
+    var onBubbleLongClickListener: ((ClusteredText) -> Unit)? = null
+
+    /**
+     * 当处于交互态且用户轻触空白区域自动切回穿透态时的监听
+     */
+    var onPassthroughModeChangedListener: ((isPassthrough: Boolean) -> Unit)? = null
+
     private var currentConfig: OverlayConfig = OverlayConfig()
+    val currentOverlayConfig: OverlayConfig get() = currentConfig
     private var currentScreenWidth = 0
     private var currentScreenHeight = 0
     private var currentDensity = 0f
@@ -77,19 +89,66 @@ class OverlayManager(private val context: Context) {
 
     private fun prepareOverlayInternal(config: OverlayConfig) {
         isDismissed = false
-        if (isShowing && rootOverlayView != null) return
+        if (isShowing && rootOverlayView != null) {
+            // 如果模式发生变化（例如从单次截屏模式切换到实时监听穿透模式，或反之），动态更新 WindowManager Flags 与点击监听
+            if (currentConfig.isRealtimeMode != config.isRealtimeMode) {
+                currentConfig = config
+                val lp = rootOverlayView?.layoutParams as? WindowManager.LayoutParams
+                if (lp != null) {
+                    val baseFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                    lp.flags = if (config.isRealtimeMode) {
+                        baseFlags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                    } else {
+                        baseFlags
+                    }
+                    try {
+                        windowManager.updateViewLayout(rootOverlayView, lp)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+                if (config.isRealtimeMode) {
+                    rootOverlayView?.setOnClickListener(null)
+                    rootOverlayView?.isClickable = false
+                } else {
+                    rootOverlayView?.isClickable = true
+                    rootOverlayView?.setOnClickListener {
+                        dismiss()
+                        onUserDismissListener?.invoke()
+                    }
+                }
+            }
+            if (config.sourceImageWidth > 0 && currentScreenWidth > 0) {
+                currentScaleX = currentScreenWidth.toFloat() / config.sourceImageWidth
+            }
+            if (config.sourceImageHeight > 0 && currentScreenHeight > 0) {
+                currentScaleY = currentScreenHeight.toFloat() / config.sourceImageHeight
+            }
+            currentConfig = config
+            return
+        }
 
+        val isRealtime = config.isRealtimeMode
         val rootView = FrameLayout(context).apply {
-            // 用户点击屏幕空白任意区域清除气泡，同时触发用户主动关闭回调
-            setOnClickListener {
-                dismiss()
-                onUserDismissListener?.invoke()
+            if (!isRealtime) {
+                // 仅在单次手动截屏翻译模式下，轻触屏幕空白背景关闭气泡；
+                // 实时监听模式下严禁拦截手势，保证用户正常滑动网页或操作游戏！
+                setOnClickListener {
+                    dismiss()
+                    onUserDismissListener?.invoke()
+                }
+            } else {
+                isClickable = false
             }
         }
 
         // WindowManager 参数配置：
-        // FLAG_NOT_FOCUSABLE or FLAG_LAYOUT_NO_LIMITS or FLAG_LAYOUT_IN_SCREEN
-        // 确保全屏刘海屏物理坐标 1:1 吻合，并强制定位在左上角对齐
+        // 实时模式增加 FLAG_NOT_TOUCHABLE：全屏触控直接穿透到底层网页/游戏，用户滑动页面毫无阻碍且绝对不会误触关闭气泡！
+        val baseFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
         val layoutParams = WindowManager.LayoutParams().apply {
             width = WindowManager.LayoutParams.MATCH_PARENT
             height = WindowManager.LayoutParams.MATCH_PARENT
@@ -98,9 +157,11 @@ class OverlayManager(private val context: Context) {
             } else {
                 WindowManager.LayoutParams.TYPE_PHONE
             }
-            flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+            flags = if (isRealtime) {
+                baseFlags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            } else {
+                baseFlags
+            }
             format = PixelFormat.TRANSLUCENT
             gravity = Gravity.TOP or Gravity.START
 
@@ -207,6 +268,28 @@ class OverlayManager(private val context: Context) {
             // 已存在对应气泡，实时刷新文本内容（流式文字打字效果）
             if (existingView.text != content) {
                 existingView.text = content
+                existingView.scrollTo(0, 0)
+            }
+            // 同步检查位置是否有平移变动（针对手操模式或缓存模式下的位置校准）
+            val box = item.boundingBox
+            val scaledLeft = (box.left * currentScaleX).toInt()
+            val scaledTop = (box.top * currentScaleY).toInt()
+            val scaledWidth = (box.width() * currentScaleX).toInt().coerceAtLeast((30 * currentDensity).toInt())
+            val left = scaledLeft.coerceIn(0, (currentScreenWidth - (30 * currentDensity).toInt()).coerceAtLeast(0))
+            val top = scaledTop.coerceIn(0, (currentScreenHeight - (20 * currentDensity).toInt()).coerceAtLeast(0))
+            val width = scaledWidth.coerceAtMost(currentScreenWidth - left)
+            val lp = existingView.layoutParams as? FrameLayout.LayoutParams
+            if (lp != null && (lp.leftMargin != left || lp.topMargin != top || lp.width != width)) {
+                lp.leftMargin = left
+                lp.topMargin = top
+                lp.width = width
+                existingView.layoutParams = lp
+                existingView.requestLayout()
+                bubbleDataMap[item.id]?.let {
+                    it.left = left
+                    it.top = top
+                    it.width = width
+                }
             }
             return
         }
@@ -266,6 +349,7 @@ class OverlayManager(private val context: Context) {
                 }
             }
         }
+        finalMaxHeight = minOf(finalMaxHeight, (screenHeight - finalTop).coerceAtLeast((20 * density).toInt()))
 
         val bubbleView = TextView(context).apply {
             val bgDrawable = GradientDrawable().apply {
@@ -309,10 +393,18 @@ class OverlayManager(private val context: Context) {
                 scrollTo(0, 0)
             }
 
-            // 区分轻触点击与上下拖拽滚动
+            // 区分轻触点击、长按重译与上下拖拽滚动
             var downX = 0f
             var downY = 0f
             var isScrolling = false
+            var hasPerformedLongPress = false
+
+            val longPressRunnable = Runnable {
+                if (!isScrolling) {
+                    hasPerformedLongPress = true
+                    onBubbleLongClickListener?.invoke(item)
+                }
+            }
 
             setOnTouchListener { v, event ->
                 when (event.action) {
@@ -320,6 +412,8 @@ class OverlayManager(private val context: Context) {
                         downX = event.rawX
                         downY = event.rawY
                         isScrolling = false
+                        hasPerformedLongPress = false
+                        mainHandler.postDelayed(longPressRunnable, ViewConfiguration.getLongPressTimeout().toLong())
                         v.onTouchEvent(event)
                         true
                     }
@@ -328,17 +422,23 @@ class OverlayManager(private val context: Context) {
                         val dy = abs(event.rawY - downY)
                         if (dy > touchSlop || dx > touchSlop) {
                             isScrolling = true
+                            mainHandler.removeCallbacks(longPressRunnable)
                             v.parent?.requestDisallowInterceptTouchEvent(true)
                         }
                         v.onTouchEvent(event)
                     }
                     MotionEvent.ACTION_UP -> {
-                        if (!isScrolling) {
+                        mainHandler.removeCallbacks(longPressRunnable)
+                        if (!isScrolling && !hasPerformedLongPress) {
                             v.performClick()
                         } else {
                             v.onTouchEvent(event)
                         }
                         true
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        mainHandler.removeCallbacks(longPressRunnable)
+                        v.onTouchEvent(event)
                     }
                     else -> v.onTouchEvent(event)
                 }
@@ -408,20 +508,24 @@ class OverlayManager(private val context: Context) {
             val box = item.boundingBox
             val scaledLeft = (box.left * currentScaleX).toInt()
             val scaledTop = (box.top * currentScaleY).toInt()
+            val scaledWidth = (box.width() * currentScaleX).toInt().coerceAtLeast((30 * currentDensity).toInt())
             val left = scaledLeft.coerceIn(0, (currentScreenWidth - (30 * currentDensity).toInt()).coerceAtLeast(0))
             val top = scaledTop.coerceIn(0, (currentScreenHeight - (20 * currentDensity).toInt()).coerceAtLeast(0))
+            val width = scaledWidth.coerceAtMost(currentScreenWidth - left)
 
             if (existing != null) {
                 val lp = existing.layoutParams as? FrameLayout.LayoutParams
-                if (lp != null && (lp.leftMargin != left || lp.topMargin != top)) {
+                if (lp != null && (lp.leftMargin != left || lp.topMargin != top || lp.width != width)) {
                     lp.leftMargin = left
                     lp.topMargin = top
+                    lp.width = width
                     existing.layoutParams = lp
                     existing.requestLayout()
                 }
                 bubbleDataMap[item.id]?.let {
                     it.left = left
                     it.top = top
+                    it.width = width
                 }
             } else {
                 showOrUpdateBubbleInternal(item, config, isFinished = true)
@@ -509,6 +613,50 @@ class OverlayManager(private val context: Context) {
             dismissInternal()
         } else {
             mainHandler.post { dismissInternal() }
+        }
+    }
+
+    /**
+     * 动态切换全屏悬浮窗的触控穿透状态：
+     * @param enabled 为 true 时开启 FLAG_NOT_TOUCHABLE（HUD 沉浸穿透态，手指滑网页/玩游戏毫无阻碍且绝不误触）；
+     *                为 false 时移除 FLAG_NOT_TOUCHABLE（气泡交互态，可点击切换原文或长按重译）。
+     */
+    fun setTouchPassthrough(enabled: Boolean) {
+        val action = Runnable {
+            val root = rootOverlayView ?: return@Runnable
+            val lp = root.layoutParams as? WindowManager.LayoutParams ?: return@Runnable
+            val baseFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+            val targetFlags = if (enabled) {
+                baseFlags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            } else {
+                baseFlags
+            }
+            if (lp.flags != targetFlags) {
+                lp.flags = targetFlags
+                try {
+                    windowManager.updateViewLayout(root, lp)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            if (enabled) {
+                root.setOnClickListener(null)
+                root.isClickable = false
+            } else {
+                root.isClickable = true
+                root.setOnClickListener {
+                    // 交互态下若点击了空白处，自动切回穿透态，不阻碍后续游戏与滑动
+                    setTouchPassthrough(true)
+                    onPassthroughModeChangedListener?.invoke(true)
+                }
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action.run()
+        } else {
+            mainHandler.post(action)
         }
     }
 }

@@ -84,6 +84,7 @@ class TranslatorService : Service() {
 
     // 实时差异化翻译状态与协程循环
     private val isRealtimeActive = AtomicBoolean(false)
+    private var isRealtimePassthrough = true
     private var realtimeJob: Job? = null
     private var longPressRunnable: Runnable? = null
     private var isLongPressTriggered = false
@@ -131,6 +132,18 @@ class TranslatorService : Service() {
             onUserDismissListener = {
                 // 仅当用户手动轻触空白区域关闭气泡时，立即终止后台还在进行的流式翻译与网络请求
                 cancelTranslation(notifyUser = false)
+            }
+            onBubbleLongClickListener = { cluster ->
+                handleBubbleRetranslate(cluster)
+            }
+            onPassthroughModeChangedListener = { isPassthrough ->
+                isRealtimePassthrough = isPassthrough
+                if (isRealtimeActive.get()) {
+                    floatingBallView?.setColorFilter(
+                        if (isPassthrough) android.graphics.Color.parseColor("#6366F1")
+                        else android.graphics.Color.parseColor("#F59E0B")
+                    )
+                }
             }
         }
 
@@ -597,9 +610,10 @@ class TranslatorService : Service() {
         }
 
         if (isRealtimeActive.compareAndSet(false, true)) {
-            // 视觉反馈：悬浮球着色标明进入实时监听态
+            isRealtimePassthrough = true
+            // 视觉反馈：悬浮球着色标明进入实时监听态（默认沉浸穿透）
             floatingBallView?.setColorFilter(android.graphics.Color.parseColor("#6366F1"))
-            Toast.makeText(this, "已开启实时差异化翻译", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "已开启实时翻译【沉浸穿透态】：可正常滑动网页与操作游戏", Toast.LENGTH_SHORT).show()
             runRealtimeTranslationLoop()
         }
     }
@@ -614,6 +628,7 @@ class TranslatorService : Service() {
             realtimeJob = null
             diffEngine.reset()
             overlayManager.dismiss()
+            isRealtimePassthrough = true
             floatingBallView?.clearColorFilter()
             Toast.makeText(this, "已关闭实时翻译模式", Toast.LENGTH_SHORT).show()
         }
@@ -688,7 +703,8 @@ class TranslatorService : Service() {
                         minFontSp = fontMinSp,
                         maxFontSp = fontMaxSp,
                         sourceImageWidth = bitmap.width,
-                        sourceImageHeight = bitmap.height
+                        sourceImageHeight = bitmap.height,
+                        isRealtimeMode = true
                     )
 
                     // 增量上屏渲染（未变动气泡零闪烁，消失的气泡平滑淡出，缓存命中的即时呈现）
@@ -704,12 +720,15 @@ class TranslatorService : Service() {
                         val requestEpoch = currentEpoch.get()
 
                         val result = hyMtClient.translateStream(diffResult.needModelTranslation, translationConfig) { clusterId, text, isFinished ->
-                            if (streamMode) {
-                                if (requestEpoch != currentEpoch.get() || !isRealtimeActive.get()) return@translateStream
-                                val target = diffResult.needModelTranslation.find { it.id == clusterId }
-                                if (target != null) {
-                                    target.translatedText = text
+                            if (requestEpoch != currentEpoch.get() || !isRealtimeActive.get()) return@translateStream
+                            val target = diffResult.needModelTranslation.find { it.id == clusterId }
+                            if (target != null) {
+                                target.translatedText = text
+                                if (streamMode) {
                                     overlayManager.showOrUpdateBubble(target, overlayConfig, isFinished)
+                                }
+                                if (isFinished) {
+                                    diffEngine.putCache(ocrLanguage, target.originalText, text)
                                 }
                             }
                         }
@@ -806,16 +825,31 @@ class TranslatorService : Service() {
             lastClickTime = currentTime
             val clickRunnable = Runnable {
                 if (isRealtimeActive.get()) {
-                    // 实时监听模式下单次点击：重置差分快照强制执行一次视口重新捕获
-                    currentEpoch.incrementAndGet()
-                    diffEngine.reset()
-                    Toast.makeText(this@TranslatorService, "实时视口已刷新", Toast.LENGTH_SHORT).show()
+                    // 实时监听模式下单次点击：在“沉浸触控穿透（滑网页/玩游戏）”与“气泡交互（点击原文/长按重译）”之间切换
+                    toggleRealtimeTouchMode()
                 } else {
                     triggerScreenTranslate()
                 }
             }
             pendingSingleClickRunnable = clickRunnable
             mainHandler.postDelayed(clickRunnable, 300)
+        }
+    }
+
+    /**
+     * 实时模式下动态切换触控穿透态与气泡交互态：
+     * 1. 穿透态（默认/紫色）：触控 100% 穿透到底层，保证手指正常滑动网页、AVG 推进对话、动作摇杆操作且绝不误触关闭气泡；
+     * 2. 交互态（亮橙色）：触控临时被浮层接管，允许用户点击气泡切换原文/译文，长按气泡强制重新翻译该句。轻触空白处自动切回穿透态。
+     */
+    private fun toggleRealtimeTouchMode() {
+        isRealtimePassthrough = !isRealtimePassthrough
+        overlayManager.setTouchPassthrough(isRealtimePassthrough)
+        if (isRealtimePassthrough) {
+            floatingBallView?.setColorFilter(android.graphics.Color.parseColor("#6366F1"))
+            Toast.makeText(this, "已恢复【沉浸穿透】：可正常滑动网页与操作游戏", Toast.LENGTH_SHORT).show()
+        } else {
+            floatingBallView?.setColorFilter(android.graphics.Color.parseColor("#F59E0B"))
+            Toast.makeText(this, "已切入【气泡交互】：可点击切换原文，长按重译该句", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -899,31 +933,53 @@ class TranslatorService : Service() {
                     minFontSp = fontMinSp,
                     maxFontSp = fontMaxSp,
                     sourceImageWidth = bmpWidth,
-                    sourceImageHeight = bmpHeight
+                    sourceImageHeight = bmpHeight,
+                    isRealtimeMode = false
                 )
 
-                // 5. 提前准备透明气泡图层（若开启流式，第一句生成出来时以零等待上屏呈现）
-                if (streamMode) {
-                    overlayManager.prepareOverlay(overlayConfig)
+                // 5. 检查本地 LRU 缓存（支持全模式缓存秒级直出）
+                val needModelClusters = mutableListOf<ClusteredText>()
+                for (cluster in clusters) {
+                    val cached = diffEngine.getCache(ocrLanguage, cluster.originalText)
+                    if (cached != null) {
+                        cluster.translatedText = cached
+                    } else {
+                        needModelClusters.add(cluster)
+                    }
                 }
 
-                // 6. 请求本地/局域网大模型流式或单次翻译
-                val result = hyMtClient.translateStream(clusters, config) { clusterId, text, isFinished ->
-                    if (streamMode) {
-                        val cluster = clusters.find { it.id == clusterId }
-                        if (cluster != null) {
-                            cluster.translatedText = text
+                // 提前准备透明气泡图层，并将所有命中缓存的条目即时挂载上屏（零模型等待、零延迟呈现）
+                overlayManager.prepareOverlay(overlayConfig)
+                for (cluster in clusters) {
+                    if (cluster.translatedText != null) {
+                        overlayManager.showOrUpdateBubble(cluster, overlayConfig, isFinished = true)
+                    }
+                }
+
+                if (needModelClusters.isEmpty()) {
+                    // 全屏文本全部命中缓存，无需请求大模型
+                    Toast.makeText(this@TranslatorService, "已从缓存秒级呈现译文", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                // 6. 仅对未命中缓存的增量文本请求本地/局域网大模型
+                val result = hyMtClient.translateStream(needModelClusters, config) { clusterId, text, isFinished ->
+                    val cluster = needModelClusters.find { it.id == clusterId }
+                    if (cluster != null) {
+                        cluster.translatedText = text
+                        if (streamMode) {
                             overlayManager.showOrUpdateBubble(cluster, overlayConfig, isFinished)
+                        }
+                        if (isFinished) {
+                            diffEngine.putCache(ocrLanguage, cluster.originalText, text)
                         }
                     }
                 }
 
                 result.onSuccess { translatedClusters ->
-                    if (!streamMode) {
-                        overlayManager.showOverlay(translatedClusters, overlayConfig)
-                    } else {
-                        // 确认所有气泡最终状态均已正确落地，无闪烁刷新
-                        for (item in translatedClusters) {
+                    for (item in translatedClusters) {
+                        if (item.translatedText != null) {
+                            diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!)
                             overlayManager.showOrUpdateBubble(item, overlayConfig, isFinished = true)
                         }
                     }
@@ -940,6 +996,50 @@ class TranslatorService : Service() {
                 floatingBallView?.visibility = View.VISIBLE
                 isTranslating.set(false)
                 currentTranslationJob = null
+            }
+        }
+    }
+
+    /**
+     * 单句强制重新翻译：当用户发现某句译文有误时长按气泡触发
+     * 1. 彻底清空该句本地 LRU 缓存；
+     * 2. 气泡即时进入“正在重译...”占位态；
+     * 3. 独立调用大模型单句翻译并流式写回更新气泡与缓存。
+     */
+    private fun handleBubbleRetranslate(cluster: ClusteredText) {
+        serviceScope.launch {
+            val prefs = MainActivity.getPrefs(this@TranslatorService)
+            val ocrLanguage = prefs.getString(MainActivity.KEY_OCR_LANGUAGE, OcrHelper.LANG_AUTO) ?: OcrHelper.LANG_AUTO
+
+            // 1. 彻底从 LRU 缓存中剔除该句译文
+            diffEngine.removeCache(ocrLanguage, cluster.originalText)
+            Toast.makeText(this@TranslatorService, "正在重新翻译本句...", Toast.LENGTH_SHORT).show()
+
+            // 2. 占位刷新
+            val config = getTranslationConfig(prefs)
+            val overlayConfig = overlayManager.currentOverlayConfig
+
+            cluster.translatedText = "正在重新翻译..."
+            overlayManager.showOrUpdateBubble(cluster, overlayConfig, isFinished = false)
+
+            // 3. 单句重新调用大模型
+            val singleResult = hyMtClient.translateStream(listOf(cluster), config) { _, partialText, isFinished ->
+                cluster.translatedText = partialText
+                overlayManager.showOrUpdateBubble(cluster, overlayConfig, isFinished)
+                if (isFinished) {
+                    diffEngine.putCache(ocrLanguage, cluster.originalText, partialText)
+                }
+            }
+
+            singleResult.onSuccess { list ->
+                for (item in list) {
+                    if (item.translatedText != null) {
+                        diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!)
+                        overlayManager.showOrUpdateBubble(item, overlayConfig, isFinished = true)
+                    }
+                }
+            }.onFailure { error ->
+                Toast.makeText(this@TranslatorService, "重译失败: ${error.localizedMessage ?: "网络异常"}", Toast.LENGTH_SHORT).show()
             }
         }
     }

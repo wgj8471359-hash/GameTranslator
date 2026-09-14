@@ -87,12 +87,15 @@ class DiffEngine(
      */
     @Synchronized
     fun putCache(ocrLang: String, originalText: String, translatedText: String) {
+        if (!isValidTranslation(originalText, translatedText)) return
         val key = buildCacheKey(ocrLang, originalText)
-        if (key.isNotEmpty() && translatedText.isNotBlank()) {
+        if (key.isNotEmpty()) {
             val clean = translatedText.trim()
             translationCache.put(key, clean)
+            val normInput = normalizeForCache(originalText)
             for ((_, tracked) in trackedMap) {
-                if (tracked.originalText.trim() == originalText.trim()) {
+                val normTracked = normalizeForCache(tracked.originalText)
+                if (normTracked == normInput || calculateSimilarity(tracked.originalText, originalText) >= 0.90f) {
                     tracked.translatedText = clean
                 }
             }
@@ -100,16 +103,107 @@ class DiffEngine(
     }
 
     /**
-     * 查询 LRU 缓存中是否已存在该句译文
+     * 查询 LRU 缓存中是否已存在该句译文（支持标点归一化与 OCR 抖动模糊容错）
      */
     @Synchronized
     fun getCache(ocrLang: String, originalText: String): String? {
         val key = buildCacheKey(ocrLang, originalText)
-        return if (key.isNotEmpty()) translationCache.get(key) else null
+        if (key.isNotEmpty()) {
+            val exact = translationCache.get(key)
+            if (exact != null) {
+                if (isValidTranslation(originalText, exact)) {
+                    return exact
+                } else {
+                    translationCache.remove(key)
+                }
+            }
+        }
+
+        // 模糊容错检索：防止 OCR 因标点噪点或单个字符抖动导致缓存击穿
+        val normInput = normalizeForCache(originalText)
+        if (normInput.length >= 3) {
+            val snapshot = translationCache.snapshot()
+            val langPrefix = "${ocrLang}_"
+            var bestMatch: String? = null
+            var bestSim = 0f
+
+            for ((cachedKey, cachedTrans) in snapshot) {
+                if (!cachedKey.startsWith(langPrefix)) continue
+                val cachedNorm = cachedKey.removePrefix(langPrefix)
+                val sim = calculateSimilarity(normInput, cachedNorm)
+                if (sim >= 0.90f && sim > bestSim) {
+                    if (isValidTranslation(originalText, cachedTrans)) {
+                        bestSim = sim
+                        bestMatch = cachedTrans
+                    }
+                }
+            }
+            if (bestMatch != null) {
+                // 命中模糊缓存后写回精确键，加速后续帧匹配
+                if (key.isNotEmpty()) {
+                    translationCache.put(key, bestMatch)
+                }
+                return bestMatch
+            }
+        }
+        return null
+    }
+
+    /**
+     * 从 LRU 缓存与活动追踪表中彻底剔除某条有瑕疵/错误的译文（支持单句强制重译）
+     */
+    @Synchronized
+    fun removeCache(ocrLang: String, originalText: String) {
+        val key = buildCacheKey(ocrLang, originalText)
+        if (key.isNotEmpty()) {
+            translationCache.remove(key)
+        }
+        val normInput = normalizeForCache(originalText)
+        val snapshot = translationCache.snapshot()
+        val langPrefix = "${ocrLang}_"
+        for ((cachedKey, _) in snapshot) {
+            if (cachedKey.startsWith(langPrefix)) {
+                val cachedNorm = cachedKey.removePrefix(langPrefix)
+                if (cachedNorm == normInput || calculateSimilarity(normInput, cachedNorm) >= 0.90f) {
+                    translationCache.remove(cachedKey)
+                }
+            }
+        }
+        for ((_, tracked) in trackedMap) {
+            val normTracked = normalizeForCache(tracked.originalText)
+            if (normTracked == normInput || calculateSimilarity(tracked.originalText, originalText) >= 0.90f) {
+                tracked.translatedText = null
+            }
+        }
+    }
+
+    /**
+     * 文本标点与控制字符归一化：消除 OCR 在首尾标点、空格、大小写上的微小抖动差异
+     */
+    fun normalizeForCache(text: String): String {
+        return text.trim()
+            .replace(Regex("\\s+"), " ")
+            .replace(Regex("[\\p{Punct}\\p{IsPunctuation}，。！？；：、“”‘’·~—…（）\\[\\]{}《》\\-_]"), "")
+            .lowercase()
+            .trim()
+    }
+
+    /**
+     * 校验大模型译文的合法性（自动防御坏译文入库或命中脏缓存）
+     */
+    fun isValidTranslation(original: String, translated: String?): Boolean {
+        if (translated.isNullOrBlank()) return false
+        val origNorm = normalizeForCache(original)
+        val transNorm = normalizeForCache(translated)
+        if (origNorm.isNotEmpty() && origNorm == transNorm) return false
+        if (translated.trim().equals(original.trim(), ignoreCase = true)) return false
+        if (translated.trim().startsWith("```") && !translated.contains("\n")) return false
+        if (translated.contains("[id]") || translated.contains("[ID]")) return false
+        return true
     }
 
     private fun buildCacheKey(ocrLang: String, text: String): String {
-        val normalized = text.trim().replace(Regex("\\s+"), " ")
+        val normalized = normalizeForCache(text)
         return if (normalized.isEmpty()) "" else "${ocrLang}_$normalized"
     }
 
@@ -185,9 +279,10 @@ class DiffEngine(
         val updated = mutableListOf<ClusteredText>()
         val added = mutableListOf<ClusteredText>()
         val matchedTrackedIds = mutableSetOf<Int>()
+        val selfCapturedTrackedIds = mutableSetOf<Int>()
         val unmatchedCurrent = mutableListOf<ClusteredText>()
 
-        // 阶段 1：静态高 IoU 空间匹配与自截屏二次识别阻断
+        // 阶段 1：静态高 IoU 空间匹配与自截屏二次识别临时标记
         for (curr in currentClusters) {
             var bestMatch: TrackedCluster? = null
             var bestIoU = 0f
@@ -204,14 +299,16 @@ class DiffEngine(
             if (bestMatch != null) {
                 matchedTrackedIds.add(bestMatch.id)
 
-                // 核心防线 1：自截屏污染阻断 (Self-Capture OCR Poisoning Filter)
+                // 核心防线 1：自截屏污染识别 (Self-Capture OCR Poisoning Filter)
                 // 若当前 OCR 识别到的文本，与该气泡已展示的译文高度吻合，
-                // 说明是截屏捕获到了自身悬浮气泡中的中文译文，绝不是新的外文输入！
+                // 说明是截屏捕获到了自身悬浮气泡中的中文译文。
+                // 标记入 selfCapturedTrackedIds，允许阶段 2 真实发生位移的外文原文接管该条目！
                 val isSelfBubbleCaptured = bestMatch.translatedText != null &&
                         (calculateSimilarity(curr.originalText, bestMatch.translatedText!!) >= 0.60f ||
                          (curr.originalText.trim().length >= 3 && bestMatch.translatedText!!.contains(curr.originalText.trim())))
 
                 if (isSelfBubbleCaptured) {
+                    selfCapturedTrackedIds.add(bestMatch.id)
                     bestMatch.boundingBox = curr.boundingBox
                     unchanged.add(
                         ClusteredText(
@@ -282,35 +379,47 @@ class DiffEngine(
         }
 
         // 阶段 2：运动学平移跟踪 (Kinematic Translation Tracker for Webpage/Manga Scrolling)
-        // 针对阶段 1 未通过静态 IoU 匹配的文本，按文本高相似度与水平对齐寻找发生垂直平移的存量气泡
+        // 针对阶段 1 未通过静态 IoU 匹配的文本，按文本高相似度寻找发生平移的存量气泡
         val stillUnmatchedCurrent = mutableListOf<ClusteredText>()
         for (curr in unmatchedCurrent) {
             var kinematicMatch: TrackedCluster? = null
             var bestSim = 0f
+            var isOverridingSelfCapture = false
+
+            val normCurr = normalizeForCache(curr.originalText)
 
             for ((_, tracked) in trackedMap) {
-                if (matchedTrackedIds.contains(tracked.id)) continue
+                // 若已被普通条目匹配则跳过；但若此前仅被自截屏占用，允许真实发生位移的源外文接管！
+                val isSelfCapturedOnly = selfCapturedTrackedIds.contains(tracked.id)
+                if (matchedTrackedIds.contains(tracked.id) && !isSelfCapturedOnly) continue
 
-                // 检查是否文本一致（原外文一致，或者截屏读出的是已知译文）
+                val normTracked = normalizeForCache(tracked.originalText)
                 val simOriginal = calculateSimilarity(curr.originalText, tracked.originalText)
                 val simTrans = if (tracked.translatedText != null) {
                     calculateSimilarity(curr.originalText, tracked.translatedText!!)
                 } else 0f
                 val effectiveSim = max(simOriginal, simTrans)
 
-                // 水平 X 坐标偏差与宽度变化在合理阈值内（页面主要发生 Y 轴上下滚动）
-                val hDist = abs(curr.boundingBox.left - tracked.boundingBox.left)
-                val wDist = abs(curr.boundingBox.width() - tracked.boundingBox.width())
-                val isHorizontallyAligned = hDist <= max(40, (tracked.boundingBox.width() * 0.35f).toInt()) &&
-                        wDist <= max(50, (tracked.boundingBox.width() * 0.40f).toInt())
+                val isExactNormMatch = normCurr.isNotEmpty() && normCurr == normTracked
+                val isHighSim = effectiveSim >= 0.88f
 
-                if (effectiveSim >= 0.85f && isHorizontallyAligned && effectiveSim > bestSim) {
-                    bestSim = effectiveSim
-                    kinematicMatch = tracked
+                // 网页滚动/重排可能伴随横向微调，只要文本高度一致（>=0.88 或规范化相等）即可直接判定为同一气泡位移
+                if (isExactNormMatch || isHighSim) {
+                    if (effectiveSim > bestSim || isExactNormMatch) {
+                        bestSim = if (isExactNormMatch) 1.0f else effectiveSim
+                        kinematicMatch = tracked
+                        isOverridingSelfCapture = isSelfCapturedOnly
+                        if (isExactNormMatch) break
+                    }
                 }
             }
 
             if (kinematicMatch != null) {
+                if (isOverridingSelfCapture) {
+                    // 真实外文在新坐标出现，剔除旧坐标自截屏产生的假 unchanged
+                    unchanged.removeAll { it.id == kinematicMatch.id }
+                    selfCapturedTrackedIds.remove(kinematicMatch.id)
+                }
                 matchedTrackedIds.add(kinematicMatch.id)
                 kinematicMatch.boundingBox = curr.boundingBox
 
@@ -344,20 +453,33 @@ class DiffEngine(
             }
         }
 
-        // 阶段 3：真正全新的文本簇（分配新 ID）
+        // 阶段 3：全新文本簇处理（前置检索本地 LRU 缓存，命中即时赋予并上屏，消除 400ms 冗余消抖）
         for (curr in stillUnmatchedCurrent) {
+            val cachedText = getCache(ocrLang, curr.originalText)
             val newId = nextClusterId++
+            val isCached = cachedText != null
             val newTracked = TrackedCluster(
                 id = newId,
                 originalText = curr.originalText,
-                translatedText = null,
+                translatedText = cachedText,
                 boundingBox = curr.boundingBox,
                 firstSeenTime = currentTime,
-                isStable = false,
-                isDisplayed = false
+                isStable = isCached,    // 命中缓存直接视为稳定，无需消抖延迟
+                isDisplayed = isCached  // 命中缓存本帧直接上屏呈现
             )
             trackedMap[newId] = newTracked
             matchedTrackedIds.add(newId)
+
+            if (isCached) {
+                added.add(
+                    ClusteredText(
+                        id = newId,
+                        originalText = curr.originalText,
+                        translatedText = cachedText,
+                        boundingBox = curr.boundingBox
+                    )
+                )
+            }
         }
 
         // 阶段 4：判定真正消失的气泡（完全划出屏幕或被覆盖）
@@ -374,11 +496,16 @@ class DiffEngine(
             }
         }
 
-        // 阶段 5：查询 LRU 翻译缓存与提取待翻译项
+        // 阶段 5：查询 LRU 翻译缓存与提取真正需要请求大模型的待翻译项
         val cachedMap = mutableMapOf<Int, String>()
         val needModel = mutableListOf<ClusteredText>()
 
         for (item in (added + updated)) {
+            // 若 item 已经拥有有效译文（如 Phase 3 缓存即时赋予）
+            if (item.translatedText != null && isValidTranslation(item.originalText, item.translatedText)) {
+                cachedMap[item.id] = item.translatedText!!
+                continue
+            }
             val cachedTranslation = getCache(ocrLang, item.originalText)
             if (cachedTranslation != null) {
                 item.translatedText = cachedTranslation

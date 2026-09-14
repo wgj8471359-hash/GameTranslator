@@ -134,6 +134,18 @@ class MainActivity : AppCompatActivity() {
         setupListeners()
     }
 
+    override fun onResume() {
+        super.onResume()
+        updateServiceStateUI()
+    }
+
+    private fun updateServiceStateUI() {
+        val isRunning = TranslatorService.isRunning
+        btnStartService.isEnabled = !isRunning
+        btnStartService.text = if (isRunning) "服务运行中 (悬浮球已常驻)" else getString(R.string.btn_start_service)
+        btnStopService.isEnabled = isRunning
+    }
+
     private fun initViews() {
         etEndpoint = findViewById(R.id.etEndpoint)
         etApiKey = findViewById(R.id.etApiKey)
@@ -273,6 +285,7 @@ class MainActivity : AppCompatActivity() {
             }
             startService(stopIntent)
             Toast.makeText(this, R.string.toast_service_stopped, Toast.LENGTH_SHORT).show()
+            btnStartService.postDelayed({ updateServiceStateUI() }, 300)
         }
 
         btnBatteryOptimization.setOnClickListener {
@@ -321,6 +334,7 @@ class MainActivity : AppCompatActivity() {
         }
         ContextCompat.startForegroundService(this, serviceIntent)
         Toast.makeText(this, R.string.toast_service_started, Toast.LENGTH_SHORT).show()
+        btnStartService.postDelayed({ updateServiceStateUI() }, 300)
     }
 
     private fun requestIgnoreBatteryOptimization() {
