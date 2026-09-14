@@ -8,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.Bitmap
@@ -40,6 +41,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -74,9 +76,21 @@ class TranslatorService : Service() {
     private lateinit var ocrHelper: OcrHelper
     private lateinit var hyMtClient: HyMtClient
     private lateinit var overlayManager: OverlayManager
+    private lateinit var diffEngine: DiffEngine
 
     // 正在运行的翻译协程任务
     private var currentTranslationJob: Job? = null
+
+    // 实时差异化翻译状态与协程循环
+    private val isRealtimeActive = AtomicBoolean(false)
+    private var realtimeJob: Job? = null
+    private var longPressRunnable: Runnable? = null
+    private var isLongPressTriggered = false
+
+    // 零内存抖动复用缓冲池（消除高频截屏 GC 掉帧）
+    private var cachedRawBitmap: Bitmap? = null
+    private var cachedCroppedBitmap: Bitmap? = null
+    private val bitmapBufferLock = Any()
 
     // 常驻屏幕捕获管道（规避 Android 14 单次令牌安全限制）
     private var virtualDisplay: VirtualDisplay? = null
@@ -106,6 +120,7 @@ class TranslatorService : Service() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
+        diffEngine = DiffEngine()
         ocrHelper = OcrHelper()
         hyMtClient = HyMtClient()
         overlayManager = OverlayManager(this).apply {
@@ -371,6 +386,13 @@ class TranslatorService : Service() {
             currentHeight = metrics.height
             currentDpi = metrics.densityDpi
 
+            synchronized(bitmapBufferLock) {
+                cachedRawBitmap?.recycle()
+                cachedRawBitmap = null
+                cachedCroppedBitmap?.recycle()
+                cachedCroppedBitmap = null
+            }
+
             val oldReader = imageReader
             val newReader = ImageReader.newInstance(currentWidth, currentHeight, PixelFormat.RGBA_8888, 2)
             imageReader = newReader
@@ -410,6 +432,13 @@ class TranslatorService : Service() {
             e.printStackTrace()
         }
         imageReader = null
+
+        synchronized(bitmapBufferLock) {
+            cachedRawBitmap?.recycle()
+            cachedRawBitmap = null
+            cachedCroppedBitmap?.recycle()
+            cachedCroppedBitmap = null
+        }
     }
 
     /**
@@ -468,7 +497,18 @@ class TranslatorService : Service() {
                         initialTouchX = event.rawX
                         initialTouchY = event.rawY
                         isDragging = false
+                        isLongPressTriggered = false
                         ballView.alpha = 1.0f // 按下立刻高亮
+
+                        // 长按 600ms 判定：触发「实时差异化翻译模式」切换
+                        val longPressTask = Runnable {
+                            if (!isDragging) {
+                                isLongPressTriggered = true
+                                toggleRealtimeMode()
+                            }
+                        }
+                        longPressRunnable = longPressTask
+                        mainHandler.postDelayed(longPressTask, 600)
                         return true
                     }
                     MotionEvent.ACTION_MOVE -> {
@@ -476,6 +516,10 @@ class TranslatorService : Service() {
                         val dy = event.rawY - initialTouchY
                         if (abs(dx) > touchSlop || abs(dy) > touchSlop) {
                             isDragging = true
+                            longPressRunnable?.let {
+                                mainHandler.removeCallbacks(it)
+                                longPressRunnable = null
+                            }
                         }
                         val screenMetrics = getCurrentScreenMetrics()
                         // 允许平滑拖拽至当前屏幕的任何位置，实时边界防护防止移出视野
@@ -485,11 +529,15 @@ class TranslatorService : Service() {
                         return true
                     }
                     MotionEvent.ACTION_UP -> {
+                        longPressRunnable?.let {
+                            mainHandler.removeCallbacks(it)
+                            longPressRunnable = null
+                        }
                         val screenMetrics = getCurrentScreenMetrics()
                         val screenWidth = screenMetrics.width
                         val screenHeight = screenMetrics.height
 
-                        if (!isDragging) {
+                        if (!isDragging && !isLongPressTriggered) {
                             // 单击事件：短暂保持高亮触发翻译，随后恢复
                             ballView.alpha = 1.0f
                             handleFloatingBallClick()
@@ -517,6 +565,187 @@ class TranslatorService : Service() {
         } catch (e: Exception) {
             e.printStackTrace()
         }
+    }
+
+    /**
+     * 切换实时差异化翻译模式开启/关闭状态
+     */
+    private fun toggleRealtimeMode() {
+        if (isRealtimeActive.get()) {
+            stopRealtimeMode()
+        } else {
+            startRealtimeMode()
+        }
+    }
+
+    /**
+     * 开启实时差异化截屏翻译循环
+     */
+    private fun startRealtimeMode() {
+        val proj = mediaProjection
+        if (proj == null) {
+            Toast.makeText(this, "截屏服务未就绪，请重新在主页启动", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (isRealtimeActive.compareAndSet(false, true)) {
+            // 视觉反馈：悬浮球着色标明进入实时监听态
+            floatingBallView?.setColorFilter(android.graphics.Color.parseColor("#6366F1"))
+            Toast.makeText(this, "已开启实时差异化翻译", Toast.LENGTH_SHORT).show()
+            runRealtimeTranslationLoop()
+        }
+    }
+
+    /**
+     * 关闭实时差异化截屏翻译循环
+     */
+    private fun stopRealtimeMode() {
+        if (isRealtimeActive.compareAndSet(true, false)) {
+            realtimeJob?.cancel()
+            realtimeJob = null
+            diffEngine.reset()
+            overlayManager.dismiss()
+            floatingBallView?.clearColorFilter()
+            Toast.makeText(this, "已关闭实时翻译模式", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * 实时差异化翻译主循环：
+     * 1. 动态自适应休眠与帧捕获（闲置降频至 2.5s，活跃 1.2s）；
+     * 2. 内存零抖动复用 Bitmap 缓冲；
+     * 3. 空间与文本两级差分比对，仅翻译新增或变动文本；
+     * 4. 增量渲染 Overlay（未变动气泡零重绘零闪烁，失效气泡平滑淡出）。
+     */
+    private fun runRealtimeTranslationLoop() {
+        realtimeJob?.cancel()
+        realtimeJob = serviceScope.launch {
+            var idleRounds = 0
+            diffEngine.reset()
+
+            val prefs = MainActivity.getPrefs(this@TranslatorService)
+            val baseInterval = try {
+                prefs.getLong(MainActivity.KEY_SAMPLE_INTERVAL_MS, DiffEngine.DEFAULT_SAMPLE_INTERVAL_MS)
+            } catch (e: Exception) {
+                try {
+                    prefs.getInt(MainActivity.KEY_SAMPLE_INTERVAL_MS, DiffEngine.DEFAULT_SAMPLE_INTERVAL_MS.toInt()).toLong()
+                } catch (e2: Exception) {
+                    DiffEngine.DEFAULT_SAMPLE_INTERVAL_MS
+                }
+            }
+
+            while (isActive && isRealtimeActive.get()) {
+                try {
+                    // 自适应降频：连续无变化时步长放宽至 2.5s，降低芯片功耗与电池发热
+                    val currentInterval = if (idleRounds >= 5) {
+                        DiffEngine.IDLE_BACKOFF_INTERVAL_MS
+                    } else {
+                        baseInterval
+                    }
+                    delay(currentInterval)
+                    if (!isActive || !isRealtimeActive.get()) break
+
+                    // 检测横竖屏旋转动态调整分辨率
+                    checkAndResizeCaptureSession()
+
+                    // 静默复用缓冲区抓帧
+                    val bitmap = captureScreen(reuse = true) ?: continue
+
+                    val lineGapRatio = prefs.getFloat(MainActivity.KEY_LINE_GAP_RATIO, 1.2f)
+                    val minTextLength = prefs.getInt(MainActivity.KEY_MIN_TEXT_LENGTH, 2)
+                    val horizontalOverlapToleranceDp = prefs.getFloat(MainActivity.KEY_HORIZONTAL_OVERLAP_TOLERANCE, -20f)
+                    val bubbleAlpha = prefs.getInt(MainActivity.KEY_BUBBLE_ALPHA, 85)
+                    val fontMinSp = prefs.getInt(MainActivity.KEY_BUBBLE_FONT_MIN_SP, 8)
+                    val fontMaxSp = prefs.getInt(MainActivity.KEY_BUBBLE_FONT_MAX_SP, 16)
+                    val density = resources.displayMetrics.density
+                    val ocrLanguage = prefs.getString(MainActivity.KEY_OCR_LANGUAGE, OcrHelper.LANG_AUTO) ?: OcrHelper.LANG_AUTO
+
+                    // 本地离线 OCR 识别与并查集聚类
+                    val clusters = ocrHelper.recognizeAndCluster(
+                        bitmap = bitmap,
+                        ocrLanguage = ocrLanguage,
+                        lineGapRatio = lineGapRatio,
+                        minTextLength = minTextLength,
+                        horizontalOverlapToleranceDp = horizontalOverlapToleranceDp,
+                        density = density
+                    )
+
+                    // 核心差分计算：空间 IoU 匹配、相似度比对、打字机消抖与 LRU 缓存匹配
+                    val diffResult = diffEngine.processFrame(clusters, ocrLanguage)
+
+                    val overlayConfig = OverlayManager.OverlayConfig(
+                        minTextLength = minTextLength,
+                        bubbleAlphaPercent = bubbleAlpha,
+                        minFontSp = fontMinSp,
+                        maxFontSp = fontMaxSp,
+                        sourceImageWidth = bitmap.width,
+                        sourceImageHeight = bitmap.height
+                    )
+
+                    // 增量上屏渲染（未变动气泡零闪烁，消失的气泡平滑淡出，缓存命中的即时呈现）
+                    if (diffResult.hasVisualChanges) {
+                        overlayManager.applyDiffResult(diffResult, overlayConfig)
+                    }
+
+                    // 增量请求大模型（仅处理未命中缓存且已稳定的文本）
+                    if (diffResult.needModelTranslation.isNotEmpty()) {
+                        idleRounds = 0
+                        val translationConfig = getTranslationConfig(prefs)
+                        val streamMode = translationConfig.streamMode
+
+                        val result = hyMtClient.translateStream(diffResult.needModelTranslation, translationConfig) { clusterId, text, isFinished ->
+                            if (streamMode) {
+                                val target = diffResult.needModelTranslation.find { it.id == clusterId }
+                                if (target != null) {
+                                    target.translatedText = text
+                                    overlayManager.showOrUpdateBubble(target, overlayConfig, isFinished)
+                                }
+                            }
+                        }
+
+                        result.onSuccess { translatedList ->
+                            for (item in translatedList) {
+                                if (item.translatedText != null) {
+                                    diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!)
+                                    overlayManager.showOrUpdateBubble(item, overlayConfig, isFinished = true)
+                                }
+                            }
+                        }
+                    } else {
+                        if (!diffResult.hasVisualChanges) {
+                            idleRounds++
+                        } else {
+                            idleRounds = 0
+                        }
+                    }
+
+                } catch (e: CancellationException) {
+                    break
+                } catch (e: Exception) {
+                    // 实时监控单次网络波动或异常静默降级，继续下一轮监听
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
+    /**
+     * 统一构造大模型调用配置
+     */
+    private fun getTranslationConfig(prefs: SharedPreferences): HyMtClient.TranslationConfig {
+        return HyMtClient.TranslationConfig(
+            endpointUrl = prefs.getString(MainActivity.KEY_ENDPOINT, getString(R.string.default_endpoint_url)) ?: "",
+            apiKey = prefs.getString(MainActivity.KEY_API_KEY, null),
+            modelName = prefs.getString(MainActivity.KEY_MODEL, getString(R.string.default_model_name)) ?: "",
+            temperature = prefs.getFloat(MainActivity.KEY_TEMPERATURE, 0.7f),
+            topP = prefs.getFloat(MainActivity.KEY_TOP_P, 0.6f),
+            frequencyPenalty = prefs.getFloat(MainActivity.KEY_FREQUENCY_PENALTY, 1.05f),
+            maxTokens = prefs.getInt(MainActivity.KEY_MAX_TOKENS, 4096),
+            systemPrompt = prefs.getString(MainActivity.KEY_SYSTEM_PROMPT, getString(R.string.default_system_prompt)) ?: "",
+            timeoutSeconds = prefs.getInt(MainActivity.KEY_TIMEOUT_SECONDS, 60),
+            streamMode = prefs.getBoolean(MainActivity.KEY_STREAM_MODE, true),
+            streamType = prefs.getString(MainActivity.KEY_STREAM_TYPE, MainActivity.STREAM_TYPE_FORM_B) ?: MainActivity.STREAM_TYPE_FORM_B
+        )
     }
 
     /**
@@ -564,7 +793,13 @@ class TranslatorService : Service() {
             // 单击：延迟 300ms 触发截屏翻译，等待双击判定
             lastClickTime = currentTime
             val clickRunnable = Runnable {
-                triggerScreenTranslate()
+                if (isRealtimeActive.get()) {
+                    // 实时监听模式下单次点击：重置差分快照强制执行一次视口重新捕获
+                    diffEngine.reset()
+                    Toast.makeText(this@TranslatorService, "实时视口已刷新", Toast.LENGTH_SHORT).show()
+                } else {
+                    triggerScreenTranslate()
+                }
             }
             pendingSingleClickRunnable = clickRunnable
             mainHandler.postDelayed(clickRunnable, 300)
@@ -599,7 +834,7 @@ class TranslatorService : Service() {
                     delay(120) // 给系统合成器足够时间刷新至新尺寸 Surface
                 }
 
-                val bitmap = captureScreen()
+                val bitmap = captureScreen(reuse = false)
                 floatingBallView?.visibility = View.VISIBLE
 
                 if (bitmap == null) {
@@ -642,23 +877,8 @@ class TranslatorService : Service() {
                     return@launch
                 }
 
-                val timeoutSeconds = prefs.getInt(MainActivity.KEY_TIMEOUT_SECONDS, 60)
-                val streamMode = prefs.getBoolean(MainActivity.KEY_STREAM_MODE, true)
-                val streamType = prefs.getString(MainActivity.KEY_STREAM_TYPE, MainActivity.STREAM_TYPE_FORM_B) ?: MainActivity.STREAM_TYPE_FORM_B
-
-                val config = HyMtClient.TranslationConfig(
-                    endpointUrl = prefs.getString(MainActivity.KEY_ENDPOINT, getString(R.string.default_endpoint_url)) ?: "",
-                    apiKey = prefs.getString(MainActivity.KEY_API_KEY, null),
-                    modelName = prefs.getString(MainActivity.KEY_MODEL, getString(R.string.default_model_name)) ?: "",
-                    temperature = prefs.getFloat(MainActivity.KEY_TEMPERATURE, 0.7f),
-                    topP = prefs.getFloat(MainActivity.KEY_TOP_P, 0.6f),
-                    frequencyPenalty = prefs.getFloat(MainActivity.KEY_FREQUENCY_PENALTY, 1.05f),
-                    maxTokens = prefs.getInt(MainActivity.KEY_MAX_TOKENS, 4096),
-                    systemPrompt = prefs.getString(MainActivity.KEY_SYSTEM_PROMPT, getString(R.string.default_system_prompt)) ?: "",
-                    timeoutSeconds = timeoutSeconds,
-                    streamMode = streamMode,
-                    streamType = streamType
-                )
+                val config = getTranslationConfig(prefs)
+                val streamMode = config.streamMode
 
                 val overlayConfig = OverlayManager.OverlayConfig(
                     minTextLength = minTextLength,
@@ -712,9 +932,10 @@ class TranslatorService : Service() {
     }
 
     /**
-     * 从常驻 ImageReader 中获取最新帧，安全解析 RowStride 并避免 Bitmap 零拷贝导致的回收异常
+     * 从常驻 ImageReader 中获取最新帧，安全解析 RowStride 并避免 Bitmap 零拷贝导致的回收异常。
+     * @param reuse 为 true 时启用单例复用缓冲，不重复分配内存，消除高频 GC 掉帧。
      */
-    private suspend fun captureScreen(): Bitmap? = withContext(Dispatchers.Default) {
+    private suspend fun captureScreen(reuse: Boolean = false): Bitmap? = withContext(Dispatchers.Default) {
         val reader = imageReader ?: return@withContext null
 
         // 尝试直接获取已到达的最新帧
@@ -753,25 +974,66 @@ class TranslatorService : Service() {
             // 图像行步长填充 (RowStride Padding) 计算，消除花屏与斜向撕裂
             val rowPadding = rowStride - pixelStride * width
 
-            val tempBitmap = Bitmap.createBitmap(
-                width + rowPadding / pixelStride,
-                height,
-                Bitmap.Config.ARGB_8888
-            )
-            tempBitmap.copyPixelsFromBuffer(buffer)
+            synchronized(bitmapBufferLock) {
+                if (reuse) {
+                    val rawW = width + rowPadding / pixelStride
+                    val rawH = height
+                    val tempBitmap = if (cachedRawBitmap != null &&
+                        cachedRawBitmap!!.width == rawW &&
+                        cachedRawBitmap!!.height == rawH &&
+                        !cachedRawBitmap!!.isRecycled
+                    ) {
+                        cachedRawBitmap!!
+                    } else {
+                        cachedRawBitmap?.recycle()
+                        val newRaw = Bitmap.createBitmap(rawW, rawH, Bitmap.Config.ARGB_8888)
+                        cachedRawBitmap = newRaw
+                        newRaw
+                    }
 
-            // 【P0 崩溃陷阱修复】：当 rowPadding == 0 时，裁剪宽高与原图一致，
-            // Android 官方 Bitmap.createBitmap 会直接返回 tempBitmap 自身。
-            // 此时必须避免 recycle，否则 cleanBitmap 的内存被释放导致后续抛出 Cannot use recycled bitmap！
-            val cleanBitmap = if (rowPadding == 0) {
-                tempBitmap
-            } else {
-                val cropped = Bitmap.createBitmap(tempBitmap, 0, 0, width, height)
-                tempBitmap.recycle()
-                cropped
+                    buffer.rewind()
+                    tempBitmap.copyPixelsFromBuffer(buffer)
+
+                    if (rowPadding == 0) {
+                        tempBitmap
+                    } else {
+                        val cleanBitmap = if (cachedCroppedBitmap != null &&
+                            cachedCroppedBitmap!!.width == width &&
+                            cachedCroppedBitmap!!.height == height &&
+                            !cachedCroppedBitmap!!.isRecycled
+                        ) {
+                            cachedCroppedBitmap!!
+                        } else {
+                            cachedCroppedBitmap?.recycle()
+                            val newCrop = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                            cachedCroppedBitmap = newCrop
+                            newCrop
+                        }
+                        val canvas = android.graphics.Canvas(cleanBitmap)
+                        val srcRect = android.graphics.Rect(0, 0, width, height)
+                        val dstRect = android.graphics.Rect(0, 0, width, height)
+                        canvas.drawBitmap(tempBitmap, srcRect, dstRect, null)
+                        cleanBitmap
+                    }
+                } else {
+                    val tempBitmap = Bitmap.createBitmap(
+                        width + rowPadding / pixelStride,
+                        height,
+                        Bitmap.Config.ARGB_8888
+                    )
+                    tempBitmap.copyPixelsFromBuffer(buffer)
+
+                    val cleanBitmap = if (rowPadding == 0) {
+                        tempBitmap
+                    } else {
+                        val cropped = Bitmap.createBitmap(tempBitmap, 0, 0, width, height)
+                        tempBitmap.recycle()
+                        cropped
+                    }
+
+                    cleanBitmap
+                }
             }
-
-            cleanBitmap
         } catch (e: Exception) {
             e.printStackTrace()
             null
@@ -789,6 +1051,13 @@ class TranslatorService : Service() {
         }
         isRunning = false
         pendingSingleClickRunnable?.let { mainHandler.removeCallbacks(it) }
+
+        // 停止实时模式与协程循环
+        try {
+            stopRealtimeMode()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
 
         // 1. 立即从 WindowManager 中移除悬浮球
         if (floatingBallView != null) {

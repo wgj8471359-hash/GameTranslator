@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 深色模式主题令牌 (Dark Mode - Linear & Zinc-950 哑黑质感) -->
+    <color name="primary">#6366F1</color>
+    <color name="primary_variant">#4F46E5</color>
+    <color name="secondary">#34D399</color>
+    <color name="secondary_variant">#10B981</color>
+
+    <color name="background">#09090B</color>
+    <color name="surface">#121215</color>
+    <color name="surface_variant">#18181B</color>
+    <color name="divider">#27272A</color>
+
+    <color name="text_primary">#F4F4F5</color>
+    <color name="text_secondary">#A1A1AA</color>
+    <color name="text_hint">#71717A</color>
+
+    <color name="accent_blue">#6366F1</color>
+    <color name="accent_green">#34D399</color>
+    <color name="accent_red">#F87171</color>
+
+    <!-- 游戏内气泡与悬浮球（统一固定深中性色以保证在任何游戏背景上的高可读性） -->
+    <color name="bubble_bg">#E618181B</color>
+    <color name="floating_ball_bg">#E618181B</color>
+    <color name="floating_ball_ring">#6366F1</color>
+</resources>

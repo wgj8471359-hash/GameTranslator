@@ -1,8 +1,9 @@
 <resources>
+    <!-- Base application theme using DayNight -->
     <style name="Theme.GameTranslator" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <item name="colorPrimary">@color/primary</item>
         <item name="colorPrimaryVariant">@color/primary_variant</item>
-        <item name="colorOnPrimary">@color/text_primary</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
         
         <item name="colorSecondary">@color/secondary</item>
         <item name="colorSecondaryVariant">@color/secondary_variant</item>
@@ -12,7 +13,9 @@
         <item name="colorSurface">@color/surface</item>
         <item name="colorOnSurface">@color/text_primary</item>
 
+        <!-- 沉浸式状态栏与导航栏（零颜色泄露） -->
         <item name="android:statusBarColor">@color/background</item>
         <item name="android:navigationBarColor">@color/background</item>
+        <item name="android:windowLightStatusBar">?attr/isLightTheme</item>
     </style>
 </resources>

@@ -49,6 +49,9 @@ class MainActivity : AppCompatActivity() {
         const val KEY_BUBBLE_FONT_MIN_SP = "bubble_font_min_sp"
         const val KEY_BUBBLE_FONT_MAX_SP = "bubble_font_max_sp"
         const val KEY_BALL_SIZE_DP = "ball_size_dp"
+        const val KEY_REALTIME_MODE = "realtime_mode"
+        const val KEY_SAMPLE_INTERVAL_MS = "sample_interval_ms"
+        const val KEY_DEBOUNCE_MS = "debounce_ms"
 
         fun getPrefs(context: Context): SharedPreferences {
             return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

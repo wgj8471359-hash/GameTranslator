@@ -4,40 +4,75 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/background"
-    android:fillViewport="true">
+    android:fillViewport="true"
+    android:fitsSystemWindows="true">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="16dp">
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:paddingTop="28dp"
+        android:paddingBottom="48dp">
 
-        <!-- 顶部标题与简介 -->
+        <!-- 顶部品牌标题与版本信息 (Apple & Linear 纯平设计) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/app_name"
+                android:textColor="@color/text_primary"
+                android:textSize="22sp"
+                android:fontFamily="sans-serif-medium"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="v2.0"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:background="@drawable/bg_version_badge"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:paddingTop="3dp"
+                android:paddingBottom="3dp" />
+        </LinearLayout>
+
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="@string/app_name"
-            android:textColor="@color/text_primary"
-            android:textSize="24sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:layout_marginBottom="16dp"
+            android:layout_marginTop="6dp"
+            android:layout_marginBottom="28dp"
             android:text="轻量局部气泡覆盖 · 本地/局域网 HY-MT2 专用翻译器"
             android:textColor="@color/text_secondary"
             android:textSize="13sp" />
 
-        <!-- 模型配置卡片 -->
+        <!-- 模块一：模型设置 (Notion 风格分组) -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="TRANSLATION MODEL"
+            android:textColor="@color/text_secondary"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08" />
+
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
+            android:layout_marginBottom="28dp"
             app:cardBackgroundColor="@color/surface"
-            app:cardCornerRadius="12dp"
-            app:cardElevation="2dp"
+            app:cardCornerRadius="8dp"
+            app:cardElevation="0dp"
             app:strokeColor="@color/divider"
             app:strokeWidth="1dp">
 
@@ -45,23 +80,20 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="16dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginBottom="12dp"
-                    android:text="@string/title_model_settings"
-                    android:textColor="@color/primary"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
+                android:padding="20dp">
 
                 <!-- Endpoint URL -->
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="10dp"
+                    android:layout_marginBottom="12dp"
                     android:hint="@string/label_endpoint"
+                    app:boxCornerRadiusTopStart="4dp"
+                    app:boxCornerRadiusTopEnd="4dp"
+                    app:boxCornerRadiusBottomStart="4dp"
+                    app:boxCornerRadiusBottomEnd="4dp"
+                    app:boxStrokeColor="@color/divider"
+                    app:boxStrokeWidth="1dp"
                     style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                     <com.google.android.material.textfield.TextInputEditText
@@ -70,16 +102,23 @@
                         android:layout_height="wrap_content"
                         android:inputType="textUri"
                         android:singleLine="true"
-                        android:textColor="@color/text_primary" />
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp" />
                 </com.google.android.material.textfield.TextInputLayout>
 
                 <!-- API Key (可选) -->
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="10dp"
+                    android:layout_marginBottom="12dp"
                     android:hint="@string/label_api_key"
                     app:passwordToggleEnabled="true"
+                    app:boxCornerRadiusTopStart="4dp"
+                    app:boxCornerRadiusTopEnd="4dp"
+                    app:boxCornerRadiusBottomStart="4dp"
+                    app:boxCornerRadiusBottomEnd="4dp"
+                    app:boxStrokeColor="@color/divider"
+                    app:boxStrokeWidth="1dp"
                     style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                     <com.google.android.material.textfield.TextInputEditText
@@ -88,15 +127,22 @@
                         android:layout_height="wrap_content"
                         android:inputType="textPassword"
                         android:singleLine="true"
-                        android:textColor="@color/text_primary" />
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp" />
                 </com.google.android.material.textfield.TextInputLayout>
 
                 <!-- Model Name -->
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="10dp"
+                    android:layout_marginBottom="12dp"
                     android:hint="@string/label_model"
+                    app:boxCornerRadiusTopStart="4dp"
+                    app:boxCornerRadiusTopEnd="4dp"
+                    app:boxCornerRadiusBottomStart="4dp"
+                    app:boxCornerRadiusBottomEnd="4dp"
+                    app:boxStrokeColor="@color/divider"
+                    app:boxStrokeWidth="1dp"
                     style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                     <com.google.android.material.textfield.TextInputEditText
@@ -104,7 +150,8 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:singleLine="true"
-                        android:textColor="@color/text_primary" />
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp" />
                 </com.google.android.material.textfield.TextInputLayout>
 
                 <!-- Temperature & Top_P (双列) -->
@@ -118,8 +165,14 @@
                         android:layout_height="wrap_content"
                         android:layout_marginEnd="6dp"
                         android:layout_weight="1"
-                        android:layout_marginBottom="10dp"
+                        android:layout_marginBottom="12dp"
                         android:hint="@string/label_temperature"
+                        app:boxCornerRadiusTopStart="4dp"
+                        app:boxCornerRadiusTopEnd="4dp"
+                        app:boxCornerRadiusBottomStart="4dp"
+                        app:boxCornerRadiusBottomEnd="4dp"
+                        app:boxStrokeColor="@color/divider"
+                        app:boxStrokeWidth="1dp"
                         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                         <com.google.android.material.textfield.TextInputEditText
@@ -128,7 +181,8 @@
                             android:layout_height="wrap_content"
                             android:inputType="numberDecimal"
                             android:singleLine="true"
-                            android:textColor="@color/text_primary" />
+                            android:textColor="@color/text_primary"
+                            android:textSize="13sp" />
                     </com.google.android.material.textfield.TextInputLayout>
 
                     <com.google.android.material.textfield.TextInputLayout
@@ -136,8 +190,14 @@
                         android:layout_height="wrap_content"
                         android:layout_marginStart="6dp"
                         android:layout_weight="1"
-                        android:layout_marginBottom="10dp"
+                        android:layout_marginBottom="12dp"
                         android:hint="@string/label_top_p"
+                        app:boxCornerRadiusTopStart="4dp"
+                        app:boxCornerRadiusTopEnd="4dp"
+                        app:boxCornerRadiusBottomStart="4dp"
+                        app:boxCornerRadiusBottomEnd="4dp"
+                        app:boxStrokeColor="@color/divider"
+                        app:boxStrokeWidth="1dp"
                         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                         <com.google.android.material.textfield.TextInputEditText
@@ -146,7 +206,8 @@
                             android:layout_height="wrap_content"
                             android:inputType="numberDecimal"
                             android:singleLine="true"
-                            android:textColor="@color/text_primary" />
+                            android:textColor="@color/text_primary"
+                            android:textSize="13sp" />
                     </com.google.android.material.textfield.TextInputLayout>
                 </LinearLayout>
 
@@ -161,8 +222,14 @@
                         android:layout_height="wrap_content"
                         android:layout_marginEnd="6dp"
                         android:layout_weight="1"
-                        android:layout_marginBottom="10dp"
+                        android:layout_marginBottom="12dp"
                         android:hint="@string/label_frequency_penalty"
+                        app:boxCornerRadiusTopStart="4dp"
+                        app:boxCornerRadiusTopEnd="4dp"
+                        app:boxCornerRadiusBottomStart="4dp"
+                        app:boxCornerRadiusBottomEnd="4dp"
+                        app:boxStrokeColor="@color/divider"
+                        app:boxStrokeWidth="1dp"
                         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                         <com.google.android.material.textfield.TextInputEditText
@@ -171,7 +238,8 @@
                             android:layout_height="wrap_content"
                             android:inputType="numberDecimal"
                             android:singleLine="true"
-                            android:textColor="@color/text_primary" />
+                            android:textColor="@color/text_primary"
+                            android:textSize="13sp" />
                     </com.google.android.material.textfield.TextInputLayout>
 
                     <com.google.android.material.textfield.TextInputLayout
@@ -179,8 +247,14 @@
                         android:layout_height="wrap_content"
                         android:layout_marginStart="6dp"
                         android:layout_weight="1"
-                        android:layout_marginBottom="10dp"
+                        android:layout_marginBottom="12dp"
                         android:hint="@string/label_max_tokens"
+                        app:boxCornerRadiusTopStart="4dp"
+                        app:boxCornerRadiusTopEnd="4dp"
+                        app:boxCornerRadiusBottomStart="4dp"
+                        app:boxCornerRadiusBottomEnd="4dp"
+                        app:boxStrokeColor="@color/divider"
+                        app:boxStrokeWidth="1dp"
                         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                         <com.google.android.material.textfield.TextInputEditText
@@ -189,7 +263,8 @@
                             android:layout_height="wrap_content"
                             android:inputType="number"
                             android:singleLine="true"
-                            android:textColor="@color/text_primary" />
+                            android:textColor="@color/text_primary"
+                            android:textSize="13sp" />
                     </com.google.android.material.textfield.TextInputLayout>
                 </LinearLayout>
 
@@ -197,8 +272,14 @@
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="10dp"
+                    android:layout_marginBottom="14dp"
                     android:hint="@string/label_timeout_seconds"
+                    app:boxCornerRadiusTopStart="4dp"
+                    app:boxCornerRadiusTopEnd="4dp"
+                    app:boxCornerRadiusBottomStart="4dp"
+                    app:boxCornerRadiusBottomEnd="4dp"
+                    app:boxStrokeColor="@color/divider"
+                    app:boxStrokeWidth="1dp"
                     style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                     <com.google.android.material.textfield.TextInputEditText
@@ -207,24 +288,25 @@
                         android:layout_height="wrap_content"
                         android:inputType="number"
                         android:singleLine="true"
-                        android:textColor="@color/text_primary" />
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp" />
                 </com.google.android.material.textfield.TextInputLayout>
 
                 <com.google.android.material.switchmaterial.SwitchMaterial
                     android:id="@+id/switchStreamMode"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="4dp"
+                    android:layout_marginBottom="6dp"
                     android:text="@string/label_stream_mode"
                     android:textColor="@color/text_primary"
-                    android:textSize="14sp"
+                    android:textSize="13sp"
                     android:checked="true" />
 
                 <RadioGroup
                     android:id="@+id/rgStreamType"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="10dp"
+                    android:layout_marginBottom="12dp"
                     android:layout_marginStart="8dp">
 
                     <com.google.android.material.radiobutton.MaterialRadioButton
@@ -249,8 +331,14 @@
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="12dp"
+                    android:layout_marginBottom="16dp"
                     android:hint="@string/label_system_prompt"
+                    app:boxCornerRadiusTopStart="4dp"
+                    app:boxCornerRadiusTopEnd="4dp"
+                    app:boxCornerRadiusBottomStart="4dp"
+                    app:boxCornerRadiusBottomEnd="4dp"
+                    app:boxStrokeColor="@color/divider"
+                    app:boxStrokeWidth="1dp"
                     style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                     <com.google.android.material.textfield.TextInputEditText
@@ -258,31 +346,47 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:gravity="top|start"
-                        android:lines="5"
+                        android:lines="4"
                         android:maxLines="8"
                         android:scrollbars="vertical"
                         android:textColor="@color/text_primary"
                         android:textSize="13sp" />
                 </com.google.android.material.textfield.TextInputLayout>
 
+                <!-- 保存按钮 -->
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnSaveConfig"
                     android:layout_width="match_parent"
-                    android:layout_height="48dp"
+                    android:layout_height="42dp"
                     android:text="@string/btn_save_config"
-                    app:cornerRadius="8dp" />
+                    android:textColor="@color/text_primary"
+                    app:backgroundTint="@color/surface_variant"
+                    app:strokeColor="@color/divider"
+                    app:strokeWidth="1dp"
+                    app:cornerRadius="6dp"
+                    android:textSize="13sp" />
 
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- OCR 聚类与噪点过滤卡片 -->
+        <!-- 模块二：OCR 聚类与噪点过滤 (Notion 风格分组) -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="OCR &amp; VISION"
+            android:textColor="@color/text_secondary"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08" />
+
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
+            android:layout_marginBottom="28dp"
             app:cardBackgroundColor="@color/surface"
-            app:cardCornerRadius="12dp"
-            app:cardElevation="2dp"
+            app:cardCornerRadius="8dp"
+            app:cardElevation="0dp"
             app:strokeColor="@color/divider"
             app:strokeWidth="1dp">
 
@@ -290,24 +394,21 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="16dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginBottom="12dp"
-                    android:text="@string/title_ocr_settings"
-                    android:textColor="@color/primary"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
+                android:padding="20dp">
 
                 <!-- OCR Language Selector (下拉选择) -->
                 <com.google.android.material.textfield.TextInputLayout
                     android:id="@+id/tilOcrLanguage"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="10dp"
+                    android:layout_marginBottom="12dp"
                     android:hint="@string/label_ocr_language"
+                    app:boxCornerRadiusTopStart="4dp"
+                    app:boxCornerRadiusTopEnd="4dp"
+                    app:boxCornerRadiusBottomStart="4dp"
+                    app:boxCornerRadiusBottomEnd="4dp"
+                    app:boxStrokeColor="@color/divider"
+                    app:boxStrokeWidth="1dp"
                     style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox.ExposedDropdownMenu">
 
                     <AutoCompleteTextView
@@ -316,7 +417,7 @@
                         android:layout_height="wrap_content"
                         android:inputType="none"
                         android:textColor="@color/text_primary"
-                        android:textSize="14sp" />
+                        android:textSize="13sp" />
                 </com.google.android.material.textfield.TextInputLayout>
 
                 <!-- Line Gap Ratio & Min Text Length (双列) -->
@@ -331,6 +432,12 @@
                         android:layout_marginEnd="6dp"
                         android:layout_weight="1"
                         android:hint="@string/label_line_gap_ratio"
+                        app:boxCornerRadiusTopStart="4dp"
+                        app:boxCornerRadiusTopEnd="4dp"
+                        app:boxCornerRadiusBottomStart="4dp"
+                        app:boxCornerRadiusBottomEnd="4dp"
+                        app:boxStrokeColor="@color/divider"
+                        app:boxStrokeWidth="1dp"
                         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                         <com.google.android.material.textfield.TextInputEditText
@@ -339,7 +446,8 @@
                             android:layout_height="wrap_content"
                             android:inputType="numberDecimal"
                             android:singleLine="true"
-                            android:textColor="@color/text_primary" />
+                            android:textColor="@color/text_primary"
+                            android:textSize="13sp" />
                     </com.google.android.material.textfield.TextInputLayout>
 
                     <com.google.android.material.textfield.TextInputLayout
@@ -348,6 +456,12 @@
                         android:layout_marginStart="6dp"
                         android:layout_weight="1"
                         android:hint="@string/label_min_text_length"
+                        app:boxCornerRadiusTopStart="4dp"
+                        app:boxCornerRadiusTopEnd="4dp"
+                        app:boxCornerRadiusBottomStart="4dp"
+                        app:boxCornerRadiusBottomEnd="4dp"
+                        app:boxStrokeColor="@color/divider"
+                        app:boxStrokeWidth="1dp"
                         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                         <com.google.android.material.textfield.TextInputEditText
@@ -356,7 +470,8 @@
                             android:layout_height="wrap_content"
                             android:inputType="number"
                             android:singleLine="true"
-                            android:textColor="@color/text_primary" />
+                            android:textColor="@color/text_primary"
+                            android:textSize="13sp" />
                     </com.google.android.material.textfield.TextInputLayout>
                 </LinearLayout>
 
@@ -364,8 +479,14 @@
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
+                    android:layout_marginTop="12dp"
                     android:hint="@string/label_horizontal_overlap_tolerance"
+                    app:boxCornerRadiusTopStart="4dp"
+                    app:boxCornerRadiusTopEnd="4dp"
+                    app:boxCornerRadiusBottomStart="4dp"
+                    app:boxCornerRadiusBottomEnd="4dp"
+                    app:boxStrokeColor="@color/divider"
+                    app:boxStrokeWidth="1dp"
                     style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                     <com.google.android.material.textfield.TextInputEditText
@@ -374,20 +495,31 @@
                         android:layout_height="wrap_content"
                         android:inputType="numberSigned|numberDecimal"
                         android:singleLine="true"
-                        android:textColor="@color/text_primary" />
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp" />
                 </com.google.android.material.textfield.TextInputLayout>
 
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- 气泡与外观样式设置卡片 -->
+        <!-- 模块三：气泡外观样式设置 (Notion 风格分组) -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="OVERLAY &amp; APPEARANCE"
+            android:textColor="@color/text_secondary"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08" />
+
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
+            android:layout_marginBottom="28dp"
             app:cardBackgroundColor="@color/surface"
-            app:cardCornerRadius="12dp"
-            app:cardElevation="2dp"
+            app:cardCornerRadius="8dp"
+            app:cardElevation="0dp"
             app:strokeColor="@color/divider"
             app:strokeWidth="1dp">
 
@@ -395,23 +527,20 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="16dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginBottom="12dp"
-                    android:text="@string/title_ui_settings"
-                    android:textColor="@color/primary"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
+                android:padding="20dp">
 
                 <!-- Floating Ball Size (dp) -->
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="10dp"
+                    android:layout_marginBottom="12dp"
                     android:hint="@string/label_ball_size"
+                    app:boxCornerRadiusTopStart="4dp"
+                    app:boxCornerRadiusTopEnd="4dp"
+                    app:boxCornerRadiusBottomStart="4dp"
+                    app:boxCornerRadiusBottomEnd="4dp"
+                    app:boxStrokeColor="@color/divider"
+                    app:boxStrokeWidth="1dp"
                     style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                     <com.google.android.material.textfield.TextInputEditText
@@ -420,15 +549,22 @@
                         android:layout_height="wrap_content"
                         android:inputType="number"
                         android:singleLine="true"
-                        android:textColor="@color/text_primary" />
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp" />
                 </com.google.android.material.textfield.TextInputLayout>
 
                 <!-- Bubble Alpha -->
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="10dp"
+                    android:layout_marginBottom="12dp"
                     android:hint="@string/label_bubble_alpha"
+                    app:boxCornerRadiusTopStart="4dp"
+                    app:boxCornerRadiusTopEnd="4dp"
+                    app:boxCornerRadiusBottomStart="4dp"
+                    app:boxCornerRadiusBottomEnd="4dp"
+                    app:boxStrokeColor="@color/divider"
+                    app:boxStrokeWidth="1dp"
                     style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                     <com.google.android.material.textfield.TextInputEditText
@@ -437,7 +573,8 @@
                         android:layout_height="wrap_content"
                         android:inputType="number"
                         android:singleLine="true"
-                        android:textColor="@color/text_primary" />
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp" />
                 </com.google.android.material.textfield.TextInputLayout>
 
                 <!-- Font Min SP & Font Max SP (双列) -->
@@ -452,6 +589,12 @@
                         android:layout_marginEnd="6dp"
                         android:layout_weight="1"
                         android:hint="@string/label_bubble_font_min_sp"
+                        app:boxCornerRadiusTopStart="4dp"
+                        app:boxCornerRadiusTopEnd="4dp"
+                        app:boxCornerRadiusBottomStart="4dp"
+                        app:boxCornerRadiusBottomEnd="4dp"
+                        app:boxStrokeColor="@color/divider"
+                        app:boxStrokeWidth="1dp"
                         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                         <com.google.android.material.textfield.TextInputEditText
@@ -460,7 +603,8 @@
                             android:layout_height="wrap_content"
                             android:inputType="number"
                             android:singleLine="true"
-                            android:textColor="@color/text_primary" />
+                            android:textColor="@color/text_primary"
+                            android:textSize="13sp" />
                     </com.google.android.material.textfield.TextInputLayout>
 
                     <com.google.android.material.textfield.TextInputLayout
@@ -469,6 +613,12 @@
                         android:layout_marginStart="6dp"
                         android:layout_weight="1"
                         android:hint="@string/label_bubble_font_max_sp"
+                        app:boxCornerRadiusTopStart="4dp"
+                        app:boxCornerRadiusTopEnd="4dp"
+                        app:boxCornerRadiusBottomStart="4dp"
+                        app:boxCornerRadiusBottomEnd="4dp"
+                        app:boxStrokeColor="@color/divider"
+                        app:boxStrokeWidth="1dp"
                         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox">
 
                         <com.google.android.material.textfield.TextInputEditText
@@ -477,21 +627,32 @@
                             android:layout_height="wrap_content"
                             android:inputType="number"
                             android:singleLine="true"
-                            android:textColor="@color/text_primary" />
+                            android:textColor="@color/text_primary"
+                            android:textSize="13sp" />
                     </com.google.android.material.textfield.TextInputLayout>
                 </LinearLayout>
 
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- 控制与服务管理卡片 -->
+        <!-- 模块四：控制与服务管理 (操作区) -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="SERVICE CONTROLS"
+            android:textColor="@color/text_secondary"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08" />
+
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
+            android:layout_marginBottom="28dp"
             app:cardBackgroundColor="@color/surface"
-            app:cardCornerRadius="12dp"
-            app:cardElevation="2dp"
+            app:cardCornerRadius="8dp"
+            app:cardElevation="0dp"
             app:strokeColor="@color/divider"
             app:strokeWidth="1dp">
 
@@ -499,70 +660,69 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="16dp">
+                android:padding="20dp">
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginBottom="12dp"
-                    android:text="@string/title_control"
-                    android:textColor="@color/primary"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
-
+                <!-- 主操作：启动服务 (6dp 圆角，Indigo Accent) -->
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnStartService"
                     android:layout_width="match_parent"
-                    android:layout_height="52dp"
-                    android:layout_marginBottom="10dp"
-                    android:backgroundTint="@color/accent_blue"
+                    android:layout_height="48dp"
+                    android:layout_marginBottom="12dp"
+                    android:backgroundTint="@color/primary"
                     android:text="@string/btn_start_service"
-                    android:textSize="15sp"
-                    app:cornerRadius="8dp" />
+                    android:textColor="#FFFFFF"
+                    android:textSize="14sp"
+                    android:fontFamily="sans-serif-medium"
+                    app:cornerRadius="6dp" />
 
+                <!-- 停止服务 -->
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnStopService"
                     android:layout_width="match_parent"
-                    android:layout_height="48dp"
+                    android:layout_height="42dp"
                     android:layout_marginBottom="10dp"
                     android:backgroundTint="@color/surface_variant"
                     android:text="@string/btn_stop_service"
                     android:textColor="@color/accent_red"
-                    app:cornerRadius="8dp"
+                    app:cornerRadius="6dp"
+                    android:textSize="13sp"
                     style="@style/Widget.MaterialComponents.Button.TextButton" />
 
+                <!-- 电池优化 -->
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnBatteryOptimization"
                     android:layout_width="match_parent"
-                    android:layout_height="48dp"
+                    android:layout_height="42dp"
                     android:layout_marginBottom="10dp"
                     android:backgroundTint="@color/surface_variant"
                     android:text="@string/btn_battery_optimization"
                     android:textColor="@color/text_secondary"
-                    app:cornerRadius="8dp"
+                    app:cornerRadius="6dp"
+                    android:textSize="13sp"
                     style="@style/Widget.MaterialComponents.Button.TextButton" />
 
+                <!-- 恢复推荐默认值 -->
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnResetRecommend"
                     android:layout_width="match_parent"
-                    android:layout_height="48dp"
+                    android:layout_height="42dp"
                     android:backgroundTint="@color/surface_variant"
                     android:text="@string/btn_reset_recommend"
                     android:textColor="@color/text_secondary"
-                    app:cornerRadius="8dp"
+                    app:cornerRadius="6dp"
+                    android:textSize="13sp"
                     style="@style/Widget.MaterialComponents.Button.TextButton" />
 
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- 使用指引说明卡片 -->
+        <!-- 模块五：使用说明卡片 -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="24dp"
             app:cardBackgroundColor="@color/surface"
-            app:cardCornerRadius="12dp"
-            app:cardElevation="2dp"
+            app:cardCornerRadius="8dp"
+            app:cardElevation="0dp"
             app:strokeColor="@color/divider"
             app:strokeWidth="1dp">
 
@@ -573,7 +733,7 @@
                 android:padding="16dp"
                 android:text="@string/tip_usage"
                 android:textColor="@color/text_secondary"
-                android:textSize="13sp" />
+                android:textSize="12sp" />
         </com.google.android.material.card.MaterialCardView>
 
     </LinearLayout>

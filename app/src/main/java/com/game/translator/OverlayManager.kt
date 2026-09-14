@@ -357,6 +357,86 @@ class OverlayManager(private val context: Context) {
     }
 
     /**
+     * 应用实时差分结果 (增量渲染管线)：
+     * 1. 维持未变动气泡 (unchanged) 绝对不动，零闪烁、零动画；
+     * 2. 平滑淡出并移除已消失的气泡 (removedIds)；
+     * 3. 原地更新文本发生变更的气泡 (updated)；
+     * 4. 呈现新出现的气泡 (added)，支持命中 LRU 缓存的瞬间上屏。
+     */
+    fun applyDiffResult(diffResult: DiffResult, config: OverlayConfig = currentConfig) {
+        val action = Runnable {
+            applyDiffResultInternal(diffResult, config)
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action.run()
+        } else {
+            mainHandler.post(action)
+        }
+    }
+
+    private fun applyDiffResultInternal(diffResult: DiffResult, config: OverlayConfig) {
+        if (isDismissed) {
+            isDismissed = false
+        }
+        if (!isShowing || rootOverlayView == null) {
+            prepareOverlayInternal(config)
+        }
+        val rootView = rootOverlayView ?: return
+
+        // 1. 平滑淡出并移除消失的气泡 (100ms 纯透明度衰减，避免突兀空白)
+        for (removedId in diffResult.removedIds) {
+            val view = bubbleViews.remove(removedId)
+            bubbleDataMap.remove(removedId)
+            if (view != null) {
+                view.animate()
+                    .alpha(0f)
+                    .setDuration(100)
+                    .withEndAction {
+                        try {
+                            rootView.removeView(view)
+                        } catch (e: Exception) {
+                            // 忽略并发移除异常
+                        }
+                    }
+                    .start()
+            }
+        }
+
+        // 2. 原地更新内容发生变动的已有气泡（若模型尚在生成，保持现有内容避免闪现原文）
+        for (item in diffResult.updated) {
+            val cachedText = diffResult.cachedMap[item.id]
+            if (cachedText != null) {
+                item.translatedText = cachedText
+            }
+            val existing = bubbleViews[item.id]
+            if (existing != null) {
+                if (item.translatedText != null && existing.text != item.translatedText) {
+                    existing.text = item.translatedText
+                }
+            } else {
+                // 若此前气泡尚未创建，走新建路径
+                showOrUpdateBubbleInternal(item, config, isFinished = item.translatedText != null)
+            }
+        }
+
+        // 3. 渲染新出现的文本簇
+        for (item in diffResult.added) {
+            val cachedText = diffResult.cachedMap[item.id]
+            if (cachedText != null) {
+                item.translatedText = cachedText
+            }
+            showOrUpdateBubbleInternal(item, config, isFinished = item.translatedText != null)
+        }
+
+        // 4. 若此前视图被清空或重建，确保有译文的存量气泡均被挂载上屏
+        for (item in diffResult.unchanged) {
+            if (!bubbleViews.containsKey(item.id) && item.translatedText != null) {
+                showOrUpdateBubbleInternal(item, config, isFinished = true)
+            }
+        }
+    }
+
+    /**
      * 批量展现翻译气泡全屏覆盖层
      * @param clusters 待展示的聚类文本与译文列表
      * @param config 样式与过滤配置（透明度、字号自适应范围、最小字数、截屏源图尺寸）
