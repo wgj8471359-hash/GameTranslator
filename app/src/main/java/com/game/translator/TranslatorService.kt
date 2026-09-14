@@ -702,8 +702,14 @@ class TranslatorService : Service() {
                         density = density
                     )
 
-                    // 核心差分计算：空间 IoU 匹配、相似度比对、打字机消抖与 LRU 缓存匹配
-                    val diffResult = diffEngine.processFrame(clusters, ocrLanguage)
+                    val activeBubbleRects = overlayManager.getVisibleBubbleImageRects()
+
+                    // 核心差分计算：空间 IoU 匹配、相似度比对、打字机消抖、光学隔离与 LRU 缓存匹配
+                    val diffResult = diffEngine.processFrame(
+                        currentClusters = clusters,
+                        ocrLang = ocrLanguage,
+                        activeBubbleRects = activeBubbleRects
+                    )
 
                     val overlayConfig = OverlayManager.OverlayConfig(
                         minTextLength = minTextLength,
@@ -731,6 +737,9 @@ class TranslatorService : Service() {
                     if (toTranslate.isNotEmpty()) {
                         idleRounds = 0
                         inFlightRealtimeClusterIds.addAll(toTranslate.map { it.id })
+                        for (item in toTranslate) {
+                            diffEngine.markInFlight(item.id, true)
+                        }
                         val translationConfig = getTranslationConfig(prefs)
                         val streamMode = translationConfig.streamMode
                         val requestEpoch = currentEpoch.get()
@@ -750,6 +759,7 @@ class TranslatorService : Service() {
                                         if (isFinished) {
                                             overlayManager.showOrUpdateBubble(target, overlayConfig, isFinished = true)
                                             diffEngine.putCache(ocrLanguage, target.originalText, text, clusterId)
+                                            diffEngine.markInFlight(clusterId, false)
                                             inFlightRealtimeClusterIds.remove(clusterId)
                                         }
                                     }
@@ -768,6 +778,9 @@ class TranslatorService : Service() {
                                 }
                             } finally {
                                 inFlightRealtimeClusterIds.removeAll(toTranslate.map { it.id }.toSet())
+                                for (item in toTranslate) {
+                                    diffEngine.markInFlight(item.id, false)
+                                }
                             }
                         }
                     } else {
@@ -802,6 +815,7 @@ class TranslatorService : Service() {
             maxTokens = prefs.getInt(MainActivity.KEY_MAX_TOKENS, 4096),
             systemPrompt = prefs.getString(MainActivity.KEY_SYSTEM_PROMPT, getString(R.string.default_system_prompt)) ?: "",
             timeoutSeconds = prefs.getInt(MainActivity.KEY_TIMEOUT_SECONDS, 60),
+            maxConcurrency = prefs.getInt(MainActivity.KEY_MAX_CONCURRENCY, 3),
             streamMode = prefs.getBoolean(MainActivity.KEY_STREAM_MODE, true),
             streamType = prefs.getString(MainActivity.KEY_STREAM_TYPE, MainActivity.STREAM_TYPE_FORM_B) ?: MainActivity.STREAM_TYPE_FORM_B
         )

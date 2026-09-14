@@ -21,6 +21,8 @@
     <string name="default_bubble_alpha">85</string>
     <string name="default_bubble_font_min_sp">8</string>
     <string name="default_bubble_font_max_sp">16</string>
+    <string name="default_max_concurrency">3</string>
+    <string name="default_sample_interval_ms">1200</string>
     <string name="default_system_prompt"># 任务目标\n将下方待翻译文本准确翻译为简体中文。\n\n# 严格约束\n1. 结构与编号锁定：待翻译文本每行均包含编号前缀（如 [1]、[2]），你必须在译文中严格保留完全相同的编号前缀，绝对不可遗漏、转义、篡改或合并编号，并注意编号位置。\n2. 符合游戏语境：符合二次元及角色扮演游戏台词风格，自然流畅，保留语气情感与暗示。\n3. 禁止额外输出：直接输出带有编号的翻译结果，严禁输出任何前言、问候、解释或代码块标记。\n4. 混合语言与专有名词：对于输入中已是简体中文的词句、角色名、专有名词或通用英文缩写（如 OK），请原样保留，仅将外文（韩文、日文、英文等）对话部分精准翻译为简体中文。</string>
 
     <!-- UI 字符串 -->
@@ -47,7 +49,9 @@
     <string name="label_top_p">Top P (推荐 0.6)</string>
     <string name="label_frequency_penalty">Frequency Penalty (推荐 1.05)</string>
     <string name="label_max_tokens">Max Tokens (推荐 4096)</string>
-    <string name="label_timeout_seconds">请求超时时间 (秒，推荐 60)</string>
+    <string name="label_timeout_seconds">超时时间 (秒，推荐 60)</string>
+    <string name="label_max_concurrency">最大并发数 (1~6，默认 3)</string>
+    <string name="label_sample_interval_ms">实时采样间隔 (毫秒，默认 1200)</string>
     <string name="label_stream_mode">开启流式逐句呈现 (实时上屏防超时)</string>
     <string name="label_stream_form_b">形态 B：逐句独立流式 (官方单句 Prompt，1.8B 小模型最稳·推荐)</string>
     <string name="label_stream_form_a">形态 A：单请求合并流式 (带 [1][2] 编号，单次网络请求)</string>

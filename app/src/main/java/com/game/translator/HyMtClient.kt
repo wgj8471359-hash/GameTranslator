@@ -3,7 +3,11 @@ package com.game.translator
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
@@ -113,6 +117,7 @@ class HyMtClient {
         val maxTokens: Int,
         val systemPrompt: String,
         val timeoutSeconds: Int = 60,
+        val maxConcurrency: Int = 3,
         val streamMode: Boolean = true,
         val streamType: String = STREAM_TYPE_FORM_B
     )
@@ -269,7 +274,7 @@ class HyMtClient {
     }
 
     /**
-     * 形态 B：逐句独立分批流式翻译（对齐混元官方单句 Prompt，1.8B 小模型极稳，无任何 [id] 标号干扰）
+     * 形态 B：逐句并发流式翻译（对齐混元官方单句 Prompt，1.8B 小模型极稳，基于 Semaphore 控制并发度）
      */
     private suspend fun translateStreamFormB(
         clusters: List<ClusteredText>,
@@ -278,113 +283,118 @@ class HyMtClient {
     ): Result<List<ClusteredText>> = withContext(Dispatchers.IO) {
         val client = getClient(config.timeoutSeconds)
         val finalUrl = buildRequestUrl(config.endpointUrl)
+        val concurrency = config.maxConcurrency.coerceIn(1, 6)
+        val semaphore = Semaphore(concurrency)
 
-        for (item in clusters) {
-            if (!coroutineContext.isActive) break
-            val original = item.originalText.trim()
-            if (original.isEmpty()) continue
+        val deferredList = clusters.map { item ->
+            async {
+                val original = item.originalText.trim()
+                if (original.isEmpty()) return@async
 
-            // 混元官方标准单句 Prompt，适用于 1.8B 等各类开源翻译模型
-            val singlePrompt = "将以下文本翻译为中文，注意只需要输出翻译后的结果，不要额外解释：\n$original"
+                semaphore.withPermit {
+                    if (!coroutineContext.isActive) return@withPermit
 
-            val requestPayload = ChatCompletionRequest(
-                model = config.modelName,
-                messages = listOf(
-                    ChatMessage(role = "user", content = singlePrompt)
-                ),
-                temperature = config.temperature,
-                topP = config.topP,
-                frequencyPenalty = config.frequencyPenalty,
-                repetitionPenalty = config.frequencyPenalty,
-                maxTokens = config.maxTokens,
-                stream = true
-            )
+                    val singlePrompt = "将以下文本翻译为中文，注意只需要输出翻译后的结果，不要额外解释：\n$original"
 
-            val jsonBody = gson.toJson(requestPayload)
-            val requestBuilder = Request.Builder()
-                .url(finalUrl)
-                .post(jsonBody.toRequestBody(jsonMediaType))
+                    val requestPayload = ChatCompletionRequest(
+                        model = config.modelName,
+                        messages = listOf(
+                            ChatMessage(role = "user", content = singlePrompt)
+                        ),
+                        temperature = config.temperature,
+                        topP = config.topP,
+                        frequencyPenalty = config.frequencyPenalty,
+                        repetitionPenalty = config.frequencyPenalty,
+                        maxTokens = config.maxTokens,
+                        stream = true
+                    )
 
-            if (!config.apiKey.isNullOrBlank()) {
-                requestBuilder.addHeader("Authorization", "Bearer ${config.apiKey.trim()}")
-            }
+                    val jsonBody = gson.toJson(requestPayload)
+                    val requestBuilder = Request.Builder()
+                        .url(finalUrl)
+                        .post(jsonBody.toRequestBody(jsonMediaType))
 
-            val httpRequest = requestBuilder.build()
-            val textBuffer = StringBuilder()
+                    if (!config.apiKey.isNullOrBlank()) {
+                        requestBuilder.addHeader("Authorization", "Bearer ${config.apiKey.trim()}")
+                    }
 
-            val call = client.newCall(httpRequest)
-            activeCalls.add(call)
+                    val httpRequest = requestBuilder.build()
+                    val textBuffer = StringBuilder()
 
-            try {
-                val response = call.execute()
+                    val call = client.newCall(httpRequest)
+                    activeCalls.add(call)
 
-                if (!response.isSuccessful) {
-                    response.close()
-                    item.translatedText = item.originalText
-                    onProgress(item.id, item.originalText, true)
-                    continue
-                }
+                    try {
+                        val response = call.execute()
 
-                val body = response.body
-                if (body != null) {
-                    val source = body.source()
-                    body.use {
-                        while (!source.exhausted()) {
-                            if (!coroutineContext.isActive) break
-                            val line = source.readUtf8Line() ?: break
-                            val trimmed = line.trim()
-                            if (trimmed.isEmpty() || trimmed.startsWith(":") || trimmed.startsWith("event:")) continue
-                            if (trimmed == "data: [DONE]" || trimmed == "data:[DONE]") break
-                            if (trimmed.startsWith("data:")) {
-                                val dataJson = trimmed.removePrefix("data:").trim()
-                                if (dataJson.isEmpty()) continue
-                                val chunk = try {
-                                    gson.fromJson(dataJson, ChatStreamChunk::class.java)
-                                } catch (e: Exception) {
-                                    null
-                                }
-                                val deltaContent = chunk?.choices?.firstOrNull()?.delta?.content
-                                if (!deltaContent.isNullOrEmpty() && coroutineContext.isActive) {
-                                    textBuffer.append(deltaContent)
-                                    var current = textBuffer.toString().trim()
-                                    if (current.startsWith("```")) {
-                                        current = current.replaceFirst(Regex("^```[a-zA-Z0-9_-]*\\R"), "")
-                                    }
-                                    if (current.isNotBlank()) {
-                                        onProgress(item.id, current, false)
+                        if (!response.isSuccessful) {
+                            response.close()
+                            item.translatedText = item.originalText
+                            onProgress(item.id, item.originalText, true)
+                            return@withPermit
+                        }
+
+                        val body = response.body
+                        if (body != null) {
+                            val source = body.source()
+                            body.use {
+                                while (!source.exhausted()) {
+                                    if (!coroutineContext.isActive) break
+                                    val line = source.readUtf8Line() ?: break
+                                    val trimmed = line.trim()
+                                    if (trimmed.isEmpty() || trimmed.startsWith(":") || trimmed.startsWith("event:")) continue
+                                    if (trimmed == "data: [DONE]" || trimmed == "data:[DONE]") break
+                                    if (trimmed.startsWith("data:")) {
+                                        val dataJson = trimmed.removePrefix("data:").trim()
+                                        if (dataJson.isEmpty()) continue
+                                        val chunk = try {
+                                            gson.fromJson(dataJson, ChatStreamChunk::class.java)
+                                        } catch (e: Exception) {
+                                            null
+                                        }
+                                        val deltaContent = chunk?.choices?.firstOrNull()?.delta?.content
+                                        if (!deltaContent.isNullOrEmpty() && coroutineContext.isActive) {
+                                            textBuffer.append(deltaContent)
+                                            var current = textBuffer.toString().trim()
+                                            if (current.startsWith("```")) {
+                                                current = current.replaceFirst(Regex("^```[a-zA-Z0-9_-]*\\R"), "")
+                                            }
+                                            if (current.isNotBlank()) {
+                                                onProgress(item.id, current, false)
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
+
+                        if (!coroutineContext.isActive) return@withPermit
+
+                        var finalClean = textBuffer.toString().trim()
+                        if (finalClean.startsWith("```")) {
+                            finalClean = finalClean
+                                .replaceFirst(Regex("^```[a-zA-Z0-9_-]*\\R"), "")
+                                .replace(Regex("\\R```$"), "")
+                                .trim()
+                        }
+
+                        val textToDisplay = if (finalClean.isNotBlank()) finalClean else item.originalText
+                        item.translatedText = textToDisplay
+                        onProgress(item.id, textToDisplay, true)
+
+                    } catch (e: Exception) {
+                        if (coroutineContext.isActive && e.message?.contains("Canceled", ignoreCase = true) != true) {
+                            item.translatedText = item.originalText
+                            onProgress(item.id, item.originalText, true)
+                        }
+                    } finally {
+                        activeCalls.remove(call)
                     }
                 }
-
-                if (!coroutineContext.isActive) break
-
-                var finalClean = textBuffer.toString().trim()
-                if (finalClean.startsWith("```")) {
-                    finalClean = finalClean
-                        .replaceFirst(Regex("^```[a-zA-Z0-9_-]*\\R"), "")
-                        .replace(Regex("\\R```$"), "")
-                        .trim()
-                }
-
-                val textToDisplay = if (finalClean.isNotBlank()) finalClean else item.originalText
-                item.translatedText = textToDisplay
-                onProgress(item.id, textToDisplay, true)
-
-            } catch (e: Exception) {
-                if (!coroutineContext.isActive || e.message?.contains("Canceled", ignoreCase = true) == true) {
-                    break
-                }
-                // 单句发生异常，降级显示原文并标记完成，不阻断后续气泡翻译
-                item.translatedText = item.originalText
-                onProgress(item.id, item.originalText, true)
-            } finally {
-                activeCalls.remove(call)
             }
         }
 
+        deferredList.awaitAll()
         Result.success(clusters)
     }
 

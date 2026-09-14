@@ -51,6 +51,7 @@ class MainActivity : AppCompatActivity() {
         const val KEY_BALL_SIZE_DP = "ball_size_dp"
         const val KEY_REALTIME_MODE = "realtime_mode"
         const val KEY_SAMPLE_INTERVAL_MS = "sample_interval_ms"
+        const val KEY_MAX_CONCURRENCY = "max_concurrency"
         const val KEY_DEBOUNCE_MS = "debounce_ms"
 
         fun getPrefs(context: Context): SharedPreferences {
@@ -76,6 +77,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var etFrequencyPenalty: TextInputEditText
     private lateinit var etMaxTokens: TextInputEditText
     private lateinit var etTimeoutSeconds: TextInputEditText
+    private lateinit var etMaxConcurrency: TextInputEditText
     private lateinit var switchStreamMode: SwitchMaterial
     private lateinit var rgStreamType: RadioGroup
     private lateinit var rbStreamFormB: MaterialRadioButton
@@ -86,6 +88,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var etLineGapRatio: TextInputEditText
     private lateinit var etMinTextLength: TextInputEditText
     private lateinit var etHorizontalOverlapTolerance: TextInputEditText
+    private lateinit var etSampleIntervalMs: TextInputEditText
     private lateinit var etBubbleAlpha: TextInputEditText
     private lateinit var etBubbleFontMinSp: TextInputEditText
     private lateinit var etBubbleFontMaxSp: TextInputEditText
@@ -155,6 +158,7 @@ class MainActivity : AppCompatActivity() {
         etFrequencyPenalty = findViewById(R.id.etFrequencyPenalty)
         etMaxTokens = findViewById(R.id.etMaxTokens)
         etTimeoutSeconds = findViewById(R.id.etTimeoutSeconds)
+        etMaxConcurrency = findViewById(R.id.etMaxConcurrency)
         switchStreamMode = findViewById(R.id.switchStreamMode)
         rgStreamType = findViewById(R.id.rgStreamType)
         rbStreamFormB = findViewById(R.id.rbStreamFormB)
@@ -165,6 +169,7 @@ class MainActivity : AppCompatActivity() {
         etLineGapRatio = findViewById(R.id.etLineGapRatio)
         etMinTextLength = findViewById(R.id.etMinTextLength)
         etHorizontalOverlapTolerance = findViewById(R.id.etHorizontalOverlapTolerance)
+        etSampleIntervalMs = findViewById(R.id.etSampleIntervalMs)
         etBubbleAlpha = findViewById(R.id.etBubbleAlpha)
         etBubbleFontMinSp = findViewById(R.id.etBubbleFontMinSp)
         etBubbleFontMaxSp = findViewById(R.id.etBubbleFontMaxSp)
@@ -186,6 +191,7 @@ class MainActivity : AppCompatActivity() {
         etFrequencyPenalty.setText(prefs.getFloat(KEY_FREQUENCY_PENALTY, 1.05f).toString())
         etMaxTokens.setText(prefs.getInt(KEY_MAX_TOKENS, 4096).toString())
         etTimeoutSeconds.setText(prefs.getInt(KEY_TIMEOUT_SECONDS, 60).toString())
+        etMaxConcurrency.setText(prefs.getInt(KEY_MAX_CONCURRENCY, 3).toString())
         switchStreamMode.isChecked = prefs.getBoolean(KEY_STREAM_MODE, true)
         val streamType = prefs.getString(KEY_STREAM_TYPE, STREAM_TYPE_FORM_B)
         if (streamType == STREAM_TYPE_FORM_A) {
@@ -206,6 +212,12 @@ class MainActivity : AppCompatActivity() {
         etLineGapRatio.setText(prefs.getFloat(KEY_LINE_GAP_RATIO, 1.2f).toString())
         etMinTextLength.setText(prefs.getInt(KEY_MIN_TEXT_LENGTH, 2).toString())
         etHorizontalOverlapTolerance.setText(prefs.getFloat(KEY_HORIZONTAL_OVERLAP_TOLERANCE, -20f).toString())
+        val sampleInterval = try {
+            prefs.getLong(KEY_SAMPLE_INTERVAL_MS, 1200L)
+        } catch (e: Exception) {
+            prefs.getInt(KEY_SAMPLE_INTERVAL_MS, 1200).toLong()
+        }
+        etSampleIntervalMs.setText(sampleInterval.toString())
         etBubbleAlpha.setText(prefs.getInt(KEY_BUBBLE_ALPHA, 85).toString())
         etBubbleFontMinSp.setText(prefs.getInt(KEY_BUBBLE_FONT_MIN_SP, 8).toString())
         etBubbleFontMaxSp.setText(prefs.getInt(KEY_BUBBLE_FONT_MAX_SP, 16).toString())
@@ -222,6 +234,7 @@ class MainActivity : AppCompatActivity() {
             putFloat(KEY_FREQUENCY_PENALTY, etFrequencyPenalty.text.toString().toFloatOrNull() ?: 1.05f)
             putInt(KEY_MAX_TOKENS, etMaxTokens.text.toString().toIntOrNull() ?: 4096)
             putInt(KEY_TIMEOUT_SECONDS, (etTimeoutSeconds.text.toString().toIntOrNull() ?: 60).coerceIn(5, 600))
+            putInt(KEY_MAX_CONCURRENCY, (etMaxConcurrency.text.toString().toIntOrNull() ?: 3).coerceIn(1, 6))
             putBoolean(KEY_STREAM_MODE, switchStreamMode.isChecked)
             val streamType = if (rbStreamFormA.isChecked) STREAM_TYPE_FORM_A else STREAM_TYPE_FORM_B
             putString(KEY_STREAM_TYPE, streamType)
@@ -233,6 +246,7 @@ class MainActivity : AppCompatActivity() {
             putFloat(KEY_LINE_GAP_RATIO, etLineGapRatio.text.toString().toFloatOrNull() ?: 1.2f)
             putInt(KEY_MIN_TEXT_LENGTH, etMinTextLength.text.toString().toIntOrNull() ?: 2)
             putFloat(KEY_HORIZONTAL_OVERLAP_TOLERANCE, etHorizontalOverlapTolerance.text.toString().toFloatOrNull() ?: -20f)
+            putLong(KEY_SAMPLE_INTERVAL_MS, (etSampleIntervalMs.text.toString().toLongOrNull() ?: 1200L).coerceIn(500L, 5000L))
             putInt(KEY_BUBBLE_ALPHA, (etBubbleAlpha.text.toString().toIntOrNull() ?: 85).coerceIn(50, 100))
             putInt(KEY_BUBBLE_FONT_MIN_SP, etBubbleFontMinSp.text.toString().toIntOrNull() ?: 8)
             putInt(KEY_BUBBLE_FONT_MAX_SP, etBubbleFontMaxSp.text.toString().toIntOrNull() ?: 16)
@@ -256,6 +270,8 @@ class MainActivity : AppCompatActivity() {
             etFrequencyPenalty.setText("1.05")
             etMaxTokens.setText("4096")
             etTimeoutSeconds.setText("60")
+            etMaxConcurrency.setText("3")
+            etSampleIntervalMs.setText("1200")
             switchStreamMode.isChecked = true
             rbStreamFormB.isChecked = true
             rgStreamType.visibility = View.VISIBLE

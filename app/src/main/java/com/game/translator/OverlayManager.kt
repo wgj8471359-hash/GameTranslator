@@ -46,14 +46,33 @@ class OverlayManager(private val context: Context) {
 
     private data class BubbleLayoutInfo(
         val id: Int,
-        var left: Int,
-        var top: Int,
-        var width: Int,
-        var height: Int
+        @Volatile var left: Int,
+        @Volatile var top: Int,
+        @Volatile var width: Int,
+        @Volatile var height: Int
     )
-    private val bubbleDataMap = mutableMapOf<Int, BubbleLayoutInfo>()
+    private val bubbleDataMap = java.util.concurrent.ConcurrentHashMap<Int, BubbleLayoutInfo>()
     // 全景文本框包围盒映射（包含尚未翻译的原文几何框，用于全局间距防护）
     private val clusterBoundsMap = mutableMapOf<Int, Rect>()
+
+    /**
+     * 获取当前屏幕上所有已呈现译文气泡映射回截屏原始图像坐标系的几何包围盒列表。
+     * 用于实时差分引擎 (DiffEngine) 实施光学隔离，识别并屏蔽气泡自捕获产生的光学污染。
+     */
+    fun getVisibleBubbleImageRects(): List<Rect> {
+        if (!isShowing || isDismissed) return emptyList()
+        val sx = if (currentScaleX > 0f) currentScaleX else 1.0f
+        val sy = if (currentScaleY > 0f) currentScaleY else 1.0f
+        return bubbleDataMap.values.mapNotNull { info ->
+            if (info.width > 0 && info.height > 0) {
+                val imgLeft = (info.left / sx).toInt()
+                val imgTop = (info.top / sy).toInt()
+                val imgRight = ((info.left + info.width) / sx).toInt()
+                val imgBottom = ((info.top + info.height) / sy).toInt()
+                Rect(imgLeft, imgTop, imgRight, imgBottom)
+            } else null
+        }
+    }
 
     /**
      * 注册全量 OCR 识别到的文本簇包围盒，用于行间距几何避让

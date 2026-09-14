@@ -33,7 +33,9 @@ private data class TrackedCluster(
     var firstSeenTime: Long,
     var isStable: Boolean = false,
     var isDisplayed: Boolean = false,
-    var lastOcrText: String = ""
+    var lastOcrText: String = "",
+    var consecutiveMissingFrames: Int = 0,
+    var isInFlight: Boolean = false
 )
 
 /**
@@ -49,12 +51,14 @@ class DiffEngine(
 ) {
 
     companion object {
-        const val IOU_MATCH_THRESHOLD = 0.65f
-        const val TEXT_SIMILARITY_THRESHOLD = 0.90f
+        const val IOU_MATCH_THRESHOLD = 0.50f
+        const val IOU_RELAXED_THRESHOLD = 0.20f
+        const val TEXT_SIMILARITY_THRESHOLD = 0.85f
         const val DEBOUNCE_STABLE_WINDOW_MS = 400L
         const val DEFAULT_SAMPLE_INTERVAL_MS = 1200L
         const val IDLE_BACKOFF_INTERVAL_MS = 2500L
         const val MAX_TRANSLATION_CACHE_SIZE = 500
+        const val MAX_MISSING_FRAMES = 3
     }
 
     // 单调递增的持久化跟踪 ID 生成器（彻底杜绝跨帧 ID 碰撞与错位）
@@ -89,6 +93,15 @@ class DiffEngine(
     @Synchronized
     fun isClusterActive(id: Int): Boolean {
         return trackedMap.containsKey(id)
+    }
+
+    /**
+     * 标记当前文本簇是否正处于网络/大模型异步翻译流中。
+     * 处于在途状态的文本簇享有绝对留存豁免权，严禁在 1.2s 采样丢失时被意外销毁或打断重译。
+     */
+    @Synchronized
+    fun markInFlight(id: Int, inFlight: Boolean) {
+        trackedMap[id]?.isInFlight = inFlight
     }
 
     /**
@@ -288,6 +301,34 @@ class DiffEngine(
     }
 
     /**
+     * 检查当前 OCR 识别到的区域是否主要落在当前活跃的气泡几何包围盒内（光学自捕获判定）
+     */
+    private fun isInsideActiveBubble(rect: Rect, activeBubbleRects: List<Rect>): Boolean {
+        if (activeBubbleRects.isEmpty()) return false
+        val currArea = rect.width() * rect.height()
+        if (currArea <= 0) return false
+        for (bubble in activeBubbleRects) {
+            val intersectLeft = max(rect.left, bubble.left)
+            val intersectTop = max(rect.top, bubble.top)
+            val intersectRight = min(rect.right, bubble.right)
+            val intersectBottom = min(rect.bottom, bubble.bottom)
+            val interW = max(0, intersectRight - intersectLeft)
+            val interH = max(0, intersectBottom - intersectTop)
+            val interArea = interW * interH
+            if (interArea > 0) {
+                val coverage = interArea.toFloat() / currArea.toFloat()
+                val bubbleArea = bubble.width() * bubble.height()
+                val union = currArea + bubbleArea - interArea
+                val iou = if (union > 0) interArea.toFloat() / union.toFloat() else 0f
+                if (coverage >= 0.50f || iou >= 0.40f) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /**
      * 核心差分调度：将当前帧识别出的文本簇与历史追踪表对比，
      * 执行几何匹配、文本匹配、消抖与缓存预取。
      */
@@ -295,7 +336,8 @@ class DiffEngine(
     fun processFrame(
         currentClusters: List<ClusteredText>,
         ocrLang: String,
-        currentTime: Long = System.currentTimeMillis()
+        currentTime: Long = System.currentTimeMillis(),
+        activeBubbleRects: List<Rect> = emptyList()
     ): DiffResult {
         val unchanged = mutableListOf<ClusteredText>()
         val moved = mutableListOf<ClusteredText>()
@@ -305,11 +347,12 @@ class DiffEngine(
         val selfCapturedTrackedIds = mutableSetOf<Int>()
         val unmatchedCurrent = mutableListOf<ClusteredText>()
 
-        // 阶段 1：静态高 IoU 空间匹配与自截屏二次识别临时标记
+        // 阶段 1：两阶段空间匹配（严格 IoU + 文本高相似度宽松 IoU）与双重自截屏光学隔离
         for (curr in currentClusters) {
             var bestMatch: TrackedCluster? = null
             var bestIoU = 0f
 
+            // 第一阶段：严格 IoU 空间匹配 (>= iouThreshold)
             for ((_, tracked) in trackedMap) {
                 if (matchedTrackedIds.contains(tracked.id)) continue
                 val iou = calculateIoU(curr.boundingBox, tracked.boundingBox)
@@ -319,8 +362,25 @@ class DiffEngine(
                 }
             }
 
+            // 第二阶段：若因物理像素抖动未命中严格 IoU，且文本高度相似 (>=0.85)，放宽到宽松 IoU (>= IOU_RELAXED_THRESHOLD)
+            if (bestMatch == null) {
+                var bestSim = 0f
+                for ((_, tracked) in trackedMap) {
+                    if (matchedTrackedIds.contains(tracked.id)) continue
+                    val iou = calculateIoU(curr.boundingBox, tracked.boundingBox)
+                    if (iou >= IOU_RELAXED_THRESHOLD) {
+                        val sim = calculateSimilarity(curr.originalText, tracked.originalText)
+                        if (sim >= 0.85f && sim > bestSim) {
+                            bestSim = sim
+                            bestMatch = tracked
+                        }
+                    }
+                }
+            }
+
             if (bestMatch != null) {
                 matchedTrackedIds.add(bestMatch.id)
+                bestMatch.consecutiveMissingFrames = 0
 
                 val simOriginal = calculateSimilarity(curr.originalText, bestMatch.originalText)
                 val simTrans = if (bestMatch.translatedText != null) {
@@ -330,20 +390,20 @@ class DiffEngine(
                     calculateSimilarity(curr.originalText, bestMatch.lastOcrText)
                 } else 0f
 
-                // 核心防线 1：多维自截屏光学回影判定 (Self-Capture Optical Shadow Immunity)
-                // 仅当该气泡当前已在屏幕上展示 (isDisplayed = true) 且截屏读出的文字具有自捕获特征：
-                // 1. 与已展示的译文具有相似度 (simTrans >= 0.35f)
-                // 2. 与译文共享 CJK 汉字字符 (韩/日 OCR 扫描中文产生的部分字识别)
-                // 3. 与上一帧捕获该气泡时的 OCR 读数高度一致 (simLastOcr >= 0.85f，静止画面零闪烁)
-                // 4. 包含在已展示译文中
-                val isSelfBubbleCaptured = bestMatch.isDisplayed && (
+                // 核心防线 1：双重自截屏光学隔离判定 (Self-Capture Optical Immunity)
+                // 1. 物理几何重叠：若该区域重叠在 activeBubbleRects 内且气泡已上屏或在途翻译中；
+                // 2. 语义与回影判定：与已展示译文/上帧 OCR 相似，或包含 CJK 汉字；
+                val isGeometricBubbleCaptured = (bestMatch.isDisplayed || bestMatch.isInFlight) &&
+                        isInsideActiveBubble(curr.boundingBox, activeBubbleRects)
+                val isOpticalShadowCaptured = (bestMatch.isDisplayed || bestMatch.isInFlight) && (
                     simTrans >= 0.35f ||
                     simLastOcr >= 0.85f ||
                     (bestMatch.translatedText != null && hasCjkOverlap(curr.originalText, bestMatch.translatedText!!)) ||
                     (bestMatch.translatedText != null && curr.originalText.trim().length >= 2 && bestMatch.translatedText!!.contains(curr.originalText.trim()))
                 )
+                val isSelfBubbleCaptured = isGeometricBubbleCaptured || isOpticalShadowCaptured
 
-                if (isSelfBubbleCaptured || simOriginal >= similarityThreshold) {
+                if (isSelfBubbleCaptured || simOriginal >= similarityThreshold || bestMatch.isInFlight) {
                     selfCapturedTrackedIds.add(bestMatch.id)
                     bestMatch.lastOcrText = curr.originalText
                     bestMatch.boundingBox = curr.boundingBox
@@ -358,7 +418,7 @@ class DiffEngine(
                     continue
                 }
 
-                // 几何位置重合但文本发生变动（游戏台词真正推进、换行或打字机出字）
+                // 几何位置重合但文本发生真正变动（游戏台词真正推进、换行）
                 if (bestMatch.originalText != curr.originalText) {
                     bestMatch.originalText = curr.originalText
                     bestMatch.translatedText = null
@@ -388,7 +448,6 @@ class DiffEngine(
         }
 
         // 阶段 2：运动学平移跟踪 (Kinematic Translation Tracker for Webpage/Manga Scrolling)
-        // 针对阶段 1 未通过静态 IoU 匹配的文本，按文本高相似度寻找发生平移的存量气泡
         val stillUnmatchedCurrent = mutableListOf<ClusteredText>()
         for (curr in unmatchedCurrent) {
             var kinematicMatch: TrackedCluster? = null
@@ -398,7 +457,6 @@ class DiffEngine(
             val normCurr = normalizeForCache(curr.originalText)
 
             for ((_, tracked) in trackedMap) {
-                // 若已被普通条目匹配则跳过；但若此前仅被自截屏占用，允许真实发生位移的源外文接管！
                 val isSelfCapturedOnly = selfCapturedTrackedIds.contains(tracked.id)
                 if (matchedTrackedIds.contains(tracked.id) && !isSelfCapturedOnly) continue
 
@@ -412,7 +470,6 @@ class DiffEngine(
                 val isExactNormMatch = normCurr.isNotEmpty() && normCurr == normTracked
                 val isHighSim = effectiveSim >= 0.88f
 
-                // 网页滚动/重排可能伴随横向微调，只要文本高度一致（>=0.88 或规范化相等）即可直接判定为同一气泡位移
                 if (isExactNormMatch || isHighSim) {
                     if (effectiveSim > bestSim || isExactNormMatch) {
                         bestSim = if (isExactNormMatch) 1.0f else effectiveSim
@@ -425,16 +482,15 @@ class DiffEngine(
 
             if (kinematicMatch != null) {
                 if (isOverridingSelfCapture) {
-                    // 真实外文在新坐标出现，剔除旧坐标自截屏产生的假 unchanged
                     unchanged.removeAll { it.id == kinematicMatch.id }
                     selfCapturedTrackedIds.remove(kinematicMatch.id)
                 }
                 matchedTrackedIds.add(kinematicMatch.id)
+                kinematicMatch.consecutiveMissingFrames = 0
                 kinematicMatch.boundingBox = curr.boundingBox
                 kinematicMatch.lastOcrText = curr.originalText
 
                 if (kinematicMatch.isDisplayed) {
-                    // 已在屏幕上：分发 moved 状态，指令 Overlay 原地平移，绝不销毁重建，零延迟零闪烁
                     moved.add(
                         ClusteredText(
                             id = kinematicMatch.id,
@@ -474,9 +530,11 @@ class DiffEngine(
                 translatedText = cachedText,
                 boundingBox = curr.boundingBox,
                 firstSeenTime = currentTime,
-                isStable = isCached,    // 命中缓存直接视为稳定，无需消抖延迟
-                isDisplayed = isCached, // 命中缓存本帧直接上屏呈现
-                lastOcrText = curr.originalText
+                isStable = isCached,
+                isDisplayed = isCached,
+                lastOcrText = curr.originalText,
+                consecutiveMissingFrames = 0,
+                isInFlight = false
             )
             trackedMap[newId] = newTracked
             matchedTrackedIds.add(newId)
@@ -493,17 +551,32 @@ class DiffEngine(
             }
         }
 
-        // 阶段 4：判定真正消失的气泡（完全划出屏幕或被覆盖）
+        // 阶段 4：判定真正消失的气泡 (多目标跟踪 MOT 状态机与连续丢帧容差)
         val removedIds = mutableListOf<Int>()
         val iterator = trackedMap.iterator()
         while (iterator.hasNext()) {
             val entry = iterator.next()
             val tracked = entry.value
             if (!matchedTrackedIds.contains(tracked.id)) {
-                if (tracked.isDisplayed) {
-                    removedIds.add(tracked.id)
+                tracked.consecutiveMissingFrames++
+                // 正在翻译中的条目具有绝对豁免权，绝不删除；
+                // 仅当连续丢失帧数达到阈值 (>= MAX_MISSING_FRAMES, 约 3.6 秒) 且非在途状态才真正移除
+                if (!tracked.isInFlight && tracked.consecutiveMissingFrames >= MAX_MISSING_FRAMES) {
+                    if (tracked.isDisplayed) {
+                        removedIds.add(tracked.id)
+                    }
+                    iterator.remove()
+                } else if (tracked.isDisplayed) {
+                    // 在缓冲容差周期内，继续维持气泡在屏幕上，向 unchanged 补充保持，防止气泡突兀闪烁消失
+                    unchanged.add(
+                        ClusteredText(
+                            id = tracked.id,
+                            originalText = tracked.originalText,
+                            translatedText = tracked.translatedText,
+                            boundingBox = tracked.boundingBox
+                        )
+                    )
                 }
-                iterator.remove()
             }
         }
 
@@ -512,6 +585,10 @@ class DiffEngine(
         val needModel = mutableListOf<ClusteredText>()
 
         for (item in (added + updated)) {
+            // 若已在途翻译中，避免重复派发并发请求
+            if (trackedMap[item.id]?.isInFlight == true) {
+                continue
+            }
             // 若 item 已经拥有有效译文（如 Phase 3 缓存即时赋予）
             if (item.translatedText != null && isValidTranslation(item.originalText, item.translatedText)) {
                 cachedMap[item.id] = item.translatedText!!
