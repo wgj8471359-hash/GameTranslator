@@ -51,6 +51,20 @@ class OverlayManager(private val context: Context) {
         var height: Int
     )
     private val bubbleDataMap = mutableMapOf<Int, BubbleLayoutInfo>()
+    // 全景文本框包围盒映射（包含尚未翻译的原文几何框，用于全局间距防护）
+    private val clusterBoundsMap = mutableMapOf<Int, Rect>()
+
+    /**
+     * 注册全量 OCR 识别到的文本簇包围盒，用于行间距几何避让
+     */
+    fun registerClusterBounds(clusters: List<ClusteredText>) {
+        synchronized(clusterBoundsMap) {
+            clusterBoundsMap.clear()
+            for (c in clusters) {
+                clusterBoundsMap[c.id] = c.boundingBox
+            }
+        }
+    }
 
     /**
      * 仅当用户手动轻触全屏空白背景清除气泡时触发（用于终止后台仍在进行的网络请求）
@@ -79,7 +93,8 @@ class OverlayManager(private val context: Context) {
     /**
      * 提前准备全屏透明覆盖根视图（用于流式逐句上屏呈现）
      */
-    fun prepareOverlay(config: OverlayConfig) {
+    fun prepareOverlay(config: OverlayConfig, allClusters: List<ClusteredText>? = null) {
+        allClusters?.let { registerClusterBounds(it) }
         if (Looper.myLooper() == Looper.getMainLooper()) {
             prepareOverlayInternal(config)
         } else {
@@ -328,10 +343,27 @@ class OverlayManager(private val context: Context) {
         val maxAllowedHeight = maxOf(originalHeight, (originalHeight * 2.4f).toInt(), (48 * density).toInt())
             .coerceAtMost((screenHeight - top).coerceAtLeast(originalHeight))
 
-        // 动态防重叠碰撞布局调整：若水平投影重叠，根据已有气泡限制向下膨胀上限或推移垂直起始点，防止气泡上下重叠覆盖
-        var finalTop = top
-        var finalMaxHeight = maxAllowedHeight
+        // 核心几何屏障：查找正下方同一竖向投影重叠的下一个文本簇，严格限制高度不得跨越下溢到下一行！
+        var nextLineTop = screenHeight
         val gapPx = (4f * density).toInt()
+        synchronized(clusterBoundsMap) {
+            for ((otherId, otherBox) in clusterBoundsMap) {
+                if (otherId == item.id) continue
+                val otherScaledLeft = (otherBox.left * scaleX).toInt()
+                val otherScaledRight = (otherBox.right * scaleX).toInt()
+                val otherScaledTop = (otherBox.top * scaleY).toInt()
+
+                val hOverlap = maxOf(left, otherScaledLeft) < minOf(left + width, otherScaledRight)
+                if (hOverlap && otherScaledTop > top + (originalHeight / 2)) {
+                    if (otherScaledTop < nextLineTop) {
+                        nextLineTop = otherScaledTop
+                    }
+                }
+            }
+        }
+        val spaceToNextLine = (nextLineTop - top - gapPx).coerceAtLeast(originalHeight)
+        var finalMaxHeight = minOf(maxAllowedHeight, spaceToNextLine)
+        var finalTop = top
 
         for ((_, exist) in bubbleDataMap) {
             val hOverlap = maxOf(left, exist.left) < minOf(left + width, exist.left + exist.width)
@@ -349,6 +381,8 @@ class OverlayManager(private val context: Context) {
                 }
             }
         }
+        val remainingToNextLine = (nextLineTop - finalTop - gapPx).coerceAtLeast(originalHeight)
+        finalMaxHeight = minOf(finalMaxHeight, remainingToNextLine)
         finalMaxHeight = minOf(finalMaxHeight, (screenHeight - finalTop).coerceAtLeast((20 * density).toInt()))
 
         val bubbleView = TextView(context).apply {
@@ -454,6 +488,15 @@ class OverlayManager(private val context: Context) {
         rootView.addView(bubbleView, childParams)
         bubbleViews[item.id] = bubbleView
         bubbleDataMap[item.id] = BubbleLayoutInfo(item.id, left, finalTop, width, originalHeight)
+        // 动态监听实际测量渲染高度，实时回填真实占位高度，确保后排气泡获得真实物理上边界
+        bubbleView.addOnLayoutChangeListener { _, _, topPos, _, bottomPos, _, _, _, _ ->
+            val actualHeight = bottomPos - topPos
+            if (actualHeight > 0) {
+                bubbleDataMap[item.id]?.let {
+                    it.height = actualHeight
+                }
+            }
+        }
     }
 
     /**
@@ -574,6 +617,7 @@ class OverlayManager(private val context: Context) {
     fun showOverlay(clusters: List<ClusteredText>, config: OverlayConfig = OverlayConfig()) {
         val showAction = Runnable {
             dismissInternal()
+            registerClusterBounds(clusters)
             prepareOverlayInternal(config)
             for (item in clusters) {
                 showOrUpdateBubbleInternal(item, config, isFinished = true)
@@ -602,6 +646,9 @@ class OverlayManager(private val context: Context) {
         rootOverlayView = null
         bubbleViews.clear()
         bubbleDataMap.clear()
+        synchronized(clusterBoundsMap) {
+            clusterBoundsMap.clear()
+        }
         isShowing = false
     }
 

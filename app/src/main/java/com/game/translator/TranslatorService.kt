@@ -715,6 +715,9 @@ class TranslatorService : Service() {
                         isRealtimeMode = true
                     )
 
+                    // 注册全景文本框包围盒映射，确保后继气泡获取真实物理下边界与防重叠空间
+                    overlayManager.registerClusterBounds(clusters)
+
                     // 增量上屏渲染（未变动气泡零闪烁，消失的气泡平滑淡出，缓存命中的即时呈现）
                     if (diffResult.hasVisualChanges) {
                         overlayManager.applyDiffResult(diffResult, overlayConfig)
@@ -742,11 +745,11 @@ class TranslatorService : Service() {
                                     val target = toTranslate.find { it.id == clusterId }
                                     if (target != null) {
                                         target.translatedText = text
-                                        if (streamMode) {
-                                            overlayManager.showOrUpdateBubble(target, overlayConfig, isFinished)
-                                        }
+                                        // 核心修复：实时模式下绝不把未成句的半截文字推上屏，杜绝下一帧 OCR 捕获碎片文字引发的撕裂和闪烁！
+                                        // 仅当整句生成完毕（isFinished == true）时原子性上屏呈现并写回缓存
                                         if (isFinished) {
-                                            diffEngine.putCache(ocrLanguage, target.originalText, text)
+                                            overlayManager.showOrUpdateBubble(target, overlayConfig, isFinished = true)
+                                            diffEngine.putCache(ocrLanguage, target.originalText, text, clusterId)
                                             inFlightRealtimeClusterIds.remove(clusterId)
                                         }
                                     }
@@ -756,7 +759,7 @@ class TranslatorService : Service() {
                                     if (requestEpoch != currentEpoch.get() || !isRealtimeActive.get()) return@onSuccess
                                     for (item in translatedList) {
                                         if (item.translatedText != null) {
-                                            diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!)
+                                            diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!, item.id)
                                             if (diffEngine.isClusterActive(item.id)) {
                                                 overlayManager.showOrUpdateBubble(item, overlayConfig, isFinished = true)
                                             }
@@ -973,8 +976,8 @@ class TranslatorService : Service() {
                     }
                 }
 
-                // 提前准备透明气泡图层，并将所有命中缓存的条目即时挂载上屏（零模型等待、零延迟呈现）
-                overlayManager.prepareOverlay(overlayConfig)
+                // 提前准备透明气泡图层并注册全景文本框，并将所有命中缓存的条目即时挂载上屏（零模型等待、零延迟呈现）
+                overlayManager.prepareOverlay(overlayConfig, clusters)
                 for (cluster in clusters) {
                     if (cluster.translatedText != null) {
                         overlayManager.showOrUpdateBubble(cluster, overlayConfig, isFinished = true)
@@ -998,7 +1001,7 @@ class TranslatorService : Service() {
                             overlayManager.showOrUpdateBubble(cluster, overlayConfig, isFinished)
                         }
                         if (isFinished) {
-                            diffEngine.putCache(ocrLanguage, cluster.originalText, text)
+                            diffEngine.putCache(ocrLanguage, cluster.originalText, text, cluster.id)
                         }
                     }
                 }
@@ -1007,7 +1010,7 @@ class TranslatorService : Service() {
                     if (requestEpoch != currentEpoch.get() || !isTranslating.get()) return@onSuccess
                     for (item in translatedClusters) {
                         if (item.translatedText != null) {
-                            diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!)
+                            diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!, item.id)
                             overlayManager.showOrUpdateBubble(item, overlayConfig, isFinished = true)
                         }
                     }
@@ -1055,14 +1058,14 @@ class TranslatorService : Service() {
                 cluster.translatedText = partialText
                 overlayManager.showOrUpdateBubble(cluster, overlayConfig, isFinished)
                 if (isFinished) {
-                    diffEngine.putCache(ocrLanguage, cluster.originalText, partialText)
+                    diffEngine.putCache(ocrLanguage, cluster.originalText, partialText, cluster.id)
                 }
             }
 
             singleResult.onSuccess { list ->
                 for (item in list) {
                     if (item.translatedText != null) {
-                        diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!)
+                        diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!, item.id)
                         overlayManager.showOrUpdateBubble(item, overlayConfig, isFinished = true)
                     }
                 }

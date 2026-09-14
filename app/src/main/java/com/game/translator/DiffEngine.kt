@@ -32,7 +32,8 @@ private data class TrackedCluster(
     var boundingBox: Rect,
     var firstSeenTime: Long,
     var isStable: Boolean = false,
-    var isDisplayed: Boolean = false
+    var isDisplayed: Boolean = false,
+    var lastOcrText: String = ""
 )
 
 /**
@@ -94,7 +95,7 @@ class DiffEngine(
      * 将翻译结果存入 LRU 缓存并同步更新当前追踪项
      */
     @Synchronized
-    fun putCache(ocrLang: String, originalText: String, translatedText: String) {
+    fun putCache(ocrLang: String, originalText: String, translatedText: String, clusterId: Int? = null) {
         if (!isValidTranslation(originalText, translatedText)) return
         val key = buildCacheKey(ocrLang, originalText)
         if (key.isNotEmpty()) {
@@ -102,9 +103,11 @@ class DiffEngine(
             translationCache.put(key, clean)
             val normInput = normalizeForCache(originalText)
             for ((_, tracked) in trackedMap) {
+                val isIdMatch = clusterId != null && tracked.id == clusterId
                 val normTracked = normalizeForCache(tracked.originalText)
-                if (normTracked == normInput || calculateSimilarity(tracked.originalText, originalText) >= 0.90f) {
+                if (isIdMatch || normTracked == normInput || calculateSimilarity(tracked.originalText, originalText) >= 0.90f) {
                     tracked.translatedText = clean
+                    tracked.isDisplayed = true
                 }
             }
         }
@@ -273,6 +276,18 @@ class DiffEngine(
     }
 
     /**
+     * 检查文本是否包含与译文重叠的中文字符或汉字（防韩/日 OCR 引擎扫描中文产生的乱码或部分字识别）
+     */
+    private fun hasCjkOverlap(s1: String, s2: String): Boolean {
+        for (c in s1) {
+            if (c.code in 0x4E00..0x9FFF) {
+                if (s2.contains(c)) return true
+            }
+        }
+        return false
+    }
+
+    /**
      * 核心差分调度：将当前帧识别出的文本簇与历史追踪表对比，
      * 执行几何匹配、文本匹配、消抖与缓存预取。
      */
@@ -307,16 +322,30 @@ class DiffEngine(
             if (bestMatch != null) {
                 matchedTrackedIds.add(bestMatch.id)
 
-                // 核心防线 1：自截屏污染识别 (Self-Capture OCR Poisoning Filter)
-                // 若当前 OCR 识别到的文本，与该气泡已展示的译文高度吻合，
-                // 说明是截屏捕获到了自身悬浮气泡中的中文译文。
-                // 标记入 selfCapturedTrackedIds，允许阶段 2 真实发生位移的外文原文接管该条目！
-                val isSelfBubbleCaptured = bestMatch.translatedText != null &&
-                        (calculateSimilarity(curr.originalText, bestMatch.translatedText!!) >= 0.60f ||
-                         (curr.originalText.trim().length >= 3 && bestMatch.translatedText!!.contains(curr.originalText.trim())))
+                val simOriginal = calculateSimilarity(curr.originalText, bestMatch.originalText)
+                val simTrans = if (bestMatch.translatedText != null) {
+                    calculateSimilarity(curr.originalText, bestMatch.translatedText!!)
+                } else 0f
+                val simLastOcr = if (bestMatch.lastOcrText.isNotEmpty()) {
+                    calculateSimilarity(curr.originalText, bestMatch.lastOcrText)
+                } else 0f
 
-                if (isSelfBubbleCaptured) {
+                // 核心防线 1：多维自截屏光学回影判定 (Self-Capture Optical Shadow Immunity)
+                // 仅当该气泡当前已在屏幕上展示 (isDisplayed = true) 且截屏读出的文字具有自捕获特征：
+                // 1. 与已展示的译文具有相似度 (simTrans >= 0.35f)
+                // 2. 与译文共享 CJK 汉字字符 (韩/日 OCR 扫描中文产生的部分字识别)
+                // 3. 与上一帧捕获该气泡时的 OCR 读数高度一致 (simLastOcr >= 0.85f，静止画面零闪烁)
+                // 4. 包含在已展示译文中
+                val isSelfBubbleCaptured = bestMatch.isDisplayed && (
+                    simTrans >= 0.35f ||
+                    simLastOcr >= 0.85f ||
+                    (bestMatch.translatedText != null && hasCjkOverlap(curr.originalText, bestMatch.translatedText!!)) ||
+                    (bestMatch.translatedText != null && curr.originalText.trim().length >= 2 && bestMatch.translatedText!!.contains(curr.originalText.trim()))
+                )
+
+                if (isSelfBubbleCaptured || simOriginal >= similarityThreshold) {
                     selfCapturedTrackedIds.add(bestMatch.id)
+                    bestMatch.lastOcrText = curr.originalText
                     bestMatch.boundingBox = curr.boundingBox
                     unchanged.add(
                         ClusteredText(
@@ -329,56 +358,28 @@ class DiffEngine(
                     continue
                 }
 
-                val similarity = calculateSimilarity(curr.originalText, bestMatch.originalText)
-                if (similarity >= similarityThreshold) {
-                    // 内容几何与文本高度吻合
+                // 几何位置重合但文本发生变动（游戏台词真正推进、换行或打字机出字）
+                if (bestMatch.originalText != curr.originalText) {
+                    bestMatch.originalText = curr.originalText
+                    bestMatch.translatedText = null
+                    bestMatch.lastOcrText = curr.originalText
                     bestMatch.boundingBox = curr.boundingBox
-                    if (bestMatch.isDisplayed) {
-                        unchanged.add(
+                    bestMatch.firstSeenTime = currentTime
+                    bestMatch.isStable = false
+                    bestMatch.isDisplayed = false
+                } else {
+                    val elapsed = currentTime - bestMatch.firstSeenTime
+                    if (elapsed >= debounceWindowMs) {
+                        bestMatch.isStable = true
+                        bestMatch.isDisplayed = true
+                        updated.add(
                             ClusteredText(
                                 id = bestMatch.id,
-                                originalText = bestMatch.originalText,
-                                translatedText = bestMatch.translatedText,
+                                originalText = curr.originalText,
+                                translatedText = null,
                                 boundingBox = curr.boundingBox
                             )
                         )
-                    } else {
-                        // 处于新增消抖窗口中，检查是否已经稳定
-                        val elapsed = currentTime - bestMatch.firstSeenTime
-                        if (elapsed >= debounceWindowMs) {
-                            bestMatch.isStable = true
-                            bestMatch.isDisplayed = true
-                            added.add(
-                                ClusteredText(
-                                    id = bestMatch.id,
-                                    originalText = curr.originalText,
-                                    translatedText = bestMatch.translatedText,
-                                    boundingBox = curr.boundingBox
-                                )
-                            )
-                        }
-                    }
-                } else {
-                    // 几何位置重合但文本发生变动（台词推进或打字机出字）
-                    if (bestMatch.originalText != curr.originalText) {
-                        bestMatch.originalText = curr.originalText
-                        bestMatch.boundingBox = curr.boundingBox
-                        bestMatch.firstSeenTime = currentTime
-                        bestMatch.isStable = false
-                    } else {
-                        val elapsed = currentTime - bestMatch.firstSeenTime
-                        if (elapsed >= debounceWindowMs) {
-                            bestMatch.isStable = true
-                            bestMatch.isDisplayed = true
-                            updated.add(
-                                ClusteredText(
-                                    id = bestMatch.id,
-                                    originalText = curr.originalText,
-                                    translatedText = null,
-                                    boundingBox = curr.boundingBox
-                                )
-                            )
-                        }
                     }
                 }
             } else {
@@ -430,6 +431,7 @@ class DiffEngine(
                 }
                 matchedTrackedIds.add(kinematicMatch.id)
                 kinematicMatch.boundingBox = curr.boundingBox
+                kinematicMatch.lastOcrText = curr.originalText
 
                 if (kinematicMatch.isDisplayed) {
                     // 已在屏幕上：分发 moved 状态，指令 Overlay 原地平移，绝不销毁重建，零延迟零闪烁
@@ -473,7 +475,8 @@ class DiffEngine(
                 boundingBox = curr.boundingBox,
                 firstSeenTime = currentTime,
                 isStable = isCached,    // 命中缓存直接视为稳定，无需消抖延迟
-                isDisplayed = isCached  // 命中缓存本帧直接上屏呈现
+                isDisplayed = isCached, // 命中缓存本帧直接上屏呈现
+                lastOcrText = curr.originalText
             )
             trackedMap[newId] = newTracked
             matchedTrackedIds.add(newId)
