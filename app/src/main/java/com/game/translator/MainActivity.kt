@@ -53,6 +53,10 @@ class MainActivity : AppCompatActivity() {
         const val KEY_SAMPLE_INTERVAL_MS = "sample_interval_ms"
         const val KEY_MAX_CONCURRENCY = "max_concurrency"
         const val KEY_DEBOUNCE_MS = "debounce_ms"
+        const val KEY_OVERLAY_LAYOUT = "overlay_layout"
+        const val LAYOUT_COVER = "cover"
+        const val LAYOUT_NOTE_BELOW = "note_below"
+        const val LAYOUT_NOTE_RIGHT = "note_right"
 
         fun getPrefs(context: Context): SharedPreferences {
             return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -66,6 +70,14 @@ class MainActivity : AppCompatActivity() {
             getString(R.string.ocr_lang_korean) to OcrHelper.LANG_KOREAN,
             getString(R.string.ocr_lang_chinese) to OcrHelper.LANG_CHINESE,
             getString(R.string.ocr_lang_latin) to OcrHelper.LANG_LATIN
+        )
+    }
+
+    private val overlayLayoutOptions by lazy {
+        listOf(
+            getString(R.string.layout_mode_cover) to LAYOUT_COVER,
+            getString(R.string.layout_mode_note_below) to LAYOUT_NOTE_BELOW,
+            getString(R.string.layout_mode_note_right) to LAYOUT_NOTE_RIGHT
         )
     }
 
@@ -83,12 +95,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var rbStreamFormB: MaterialRadioButton
     private lateinit var rbStreamFormA: MaterialRadioButton
     private lateinit var actvOcrLanguage: AutoCompleteTextView
+    private lateinit var actvOverlayLayout: AutoCompleteTextView
     private lateinit var etSystemPrompt: TextInputEditText
     private lateinit var etBallSize: TextInputEditText
     private lateinit var etLineGapRatio: TextInputEditText
     private lateinit var etMinTextLength: TextInputEditText
     private lateinit var etHorizontalOverlapTolerance: TextInputEditText
     private lateinit var etSampleIntervalMs: TextInputEditText
+    private lateinit var etDebounceMs: TextInputEditText
     private lateinit var etBubbleAlpha: TextInputEditText
     private lateinit var etBubbleFontMinSp: TextInputEditText
     private lateinit var etBubbleFontMaxSp: TextInputEditText
@@ -164,12 +178,14 @@ class MainActivity : AppCompatActivity() {
         rbStreamFormB = findViewById(R.id.rbStreamFormB)
         rbStreamFormA = findViewById(R.id.rbStreamFormA)
         actvOcrLanguage = findViewById(R.id.actvOcrLanguage)
+    actvOverlayLayout = findViewById(R.id.actvOverlayLayout)
         etSystemPrompt = findViewById(R.id.etSystemPrompt)
         etBallSize = findViewById(R.id.etBallSize)
         etLineGapRatio = findViewById(R.id.etLineGapRatio)
         etMinTextLength = findViewById(R.id.etMinTextLength)
         etHorizontalOverlapTolerance = findViewById(R.id.etHorizontalOverlapTolerance)
         etSampleIntervalMs = findViewById(R.id.etSampleIntervalMs)
+        etDebounceMs = findViewById(R.id.etDebounceMs)
         etBubbleAlpha = findViewById(R.id.etBubbleAlpha)
         etBubbleFontMinSp = findViewById(R.id.etBubbleFontMinSp)
         etBubbleFontMaxSp = findViewById(R.id.etBubbleFontMaxSp)
@@ -207,6 +223,12 @@ class MainActivity : AppCompatActivity() {
         val selectedOcr = ocrLangOptions.find { it.second == savedOcrLang } ?: ocrLangOptions[0]
         actvOcrLanguage.setText(selectedOcr.first, false)
 
+        val layoutAdapter = ArrayAdapter(this, android.R.layout.simple_dropdown_item_1line, overlayLayoutOptions.map { it.first })
+        actvOverlayLayout.setAdapter(layoutAdapter)
+        val savedLayout = prefs.getString(KEY_OVERLAY_LAYOUT, LAYOUT_COVER)
+        val selectedLayout = overlayLayoutOptions.find { it.second == savedLayout } ?: overlayLayoutOptions[0]
+        actvOverlayLayout.setText(selectedLayout.first, false)
+
         etSystemPrompt.setText(prefs.getString(KEY_SYSTEM_PROMPT, getString(R.string.default_system_prompt)))
         etBallSize.setText(prefs.getInt(KEY_BALL_SIZE_DP, 44).toString())
         etLineGapRatio.setText(prefs.getFloat(KEY_LINE_GAP_RATIO, 1.2f).toString())
@@ -218,6 +240,7 @@ class MainActivity : AppCompatActivity() {
             prefs.getInt(KEY_SAMPLE_INTERVAL_MS, 1200).toLong()
         }
         etSampleIntervalMs.setText(sampleInterval.toString())
+        etDebounceMs.setText(prefs.getInt(KEY_DEBOUNCE_MS, 400).toString())
         etBubbleAlpha.setText(prefs.getInt(KEY_BUBBLE_ALPHA, 85).toString())
         etBubbleFontMinSp.setText(prefs.getInt(KEY_BUBBLE_FONT_MIN_SP, 8).toString())
         etBubbleFontMaxSp.setText(prefs.getInt(KEY_BUBBLE_FONT_MAX_SP, 16).toString())
@@ -247,6 +270,10 @@ class MainActivity : AppCompatActivity() {
             putInt(KEY_MIN_TEXT_LENGTH, etMinTextLength.text.toString().toIntOrNull() ?: 2)
             putFloat(KEY_HORIZONTAL_OVERLAP_TOLERANCE, etHorizontalOverlapTolerance.text.toString().toFloatOrNull() ?: -20f)
             putLong(KEY_SAMPLE_INTERVAL_MS, (etSampleIntervalMs.text.toString().toLongOrNull() ?: 1200L).coerceIn(500L, 5000L))
+            putInt(KEY_DEBOUNCE_MS, (etDebounceMs.text.toString().toIntOrNull() ?: 400).coerceIn(100, 2000))
+            val currentLayoutText = actvOverlayLayout.text.toString()
+            val selectedLayoutCode = overlayLayoutOptions.find { it.first == currentLayoutText }?.second ?: LAYOUT_COVER
+            putString(KEY_OVERLAY_LAYOUT, selectedLayoutCode)
             putInt(KEY_BUBBLE_ALPHA, (etBubbleAlpha.text.toString().toIntOrNull() ?: 85).coerceIn(50, 100))
             putInt(KEY_BUBBLE_FONT_MIN_SP, etBubbleFontMinSp.text.toString().toIntOrNull() ?: 8)
             putInt(KEY_BUBBLE_FONT_MAX_SP, etBubbleFontMaxSp.text.toString().toIntOrNull() ?: 16)
@@ -272,10 +299,12 @@ class MainActivity : AppCompatActivity() {
             etTimeoutSeconds.setText("60")
             etMaxConcurrency.setText("3")
             etSampleIntervalMs.setText("1200")
+            etDebounceMs.setText("400")
             switchStreamMode.isChecked = true
             rbStreamFormB.isChecked = true
             rgStreamType.visibility = View.VISIBLE
             actvOcrLanguage.setText(ocrLangOptions[0].first, false)
+            actvOverlayLayout.setText(overlayLayoutOptions[0].first, false)
             etBallSize.setText("44")
             etSystemPrompt.setText(getString(R.string.default_system_prompt))
             saveConfig()

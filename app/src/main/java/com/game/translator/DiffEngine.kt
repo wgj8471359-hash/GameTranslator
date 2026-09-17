@@ -33,7 +33,7 @@ private data class TrackedCluster(
 
 /** IDs identify immutable source revisions, not reusable screen slots. */
 class DiffEngine(
-    private val debounceWindowMs: Long = DEBOUNCE_STABLE_WINDOW_MS,
+    debounceWindowMs: Long = DEBOUNCE_STABLE_WINDOW_MS,
     cacheCapacity: Int = MAX_TRANSLATION_CACHE_SIZE
 ) {
     companion object {
@@ -41,6 +41,14 @@ class DiffEngine(
         const val DEFAULT_SAMPLE_INTERVAL_MS = 1200L
         const val IDLE_BACKOFF_INTERVAL_MS = 2500L
         const val MAX_TRANSLATION_CACHE_SIZE = 500
+    }
+
+    private var stableWindowMs = debounceWindowMs.coerceIn(100L, 2000L)
+
+    /** 运行中调整稳定消抖窗口（实时模式每次启动时应用最新配置） */
+    @Synchronized
+    fun configureDebounce(windowMs: Long) {
+        stableWindowMs = windowMs.coerceIn(100L, 2000L)
     }
 
     // Never reuse an ID, even after reset/rotation. Old finally blocks cannot
@@ -174,7 +182,7 @@ class DiffEngine(
             }
             // Stable != displayed. A stationary candidate MUST progress here.
             if (t.translatedText == null && !t.isInFlight &&
-                currentTime - t.firstSeenTime >= debounceWindowMs && currentTime >= t.retryAt) {
+                currentTime - t.firstSeenTime >= stableWindowMs && currentTime >= t.retryAt) {
                 need.add(item)
             }
         }

@@ -52,6 +52,11 @@
     <string name="label_timeout_seconds">超时时间 (秒，推荐 60)</string>
     <string name="label_max_concurrency">最大并发数 (1~6，默认 3)</string>
     <string name="label_sample_interval_ms">实时采样间隔 (毫秒，默认 1200)</string>
+    <string name="label_debounce_ms">译文稳定消抖 (毫秒，默认 400，建议 150~300 更快出译)</string>
+    <string name="label_overlay_layout">译文布局 (遮盖原位 / 下一行旁注 / 右侧旁注)</string>
+    <string name="layout_mode_cover">遮盖原位（默认）</string>
+    <string name="layout_mode_note_below">下一行旁注</string>
+    <string name="layout_mode_note_right">右侧旁注</string>
     <string name="label_stream_mode">开启流式逐句呈现 (实时上屏防超时)</string>
     <string name="label_stream_form_b">形态 B：逐句独立流式 (官方单句 Prompt，1.8B 小模型最稳·推荐)</string>
     <string name="label_stream_form_a">形态 A：单请求合并流式 (带 [1][2] 编号，单次网络请求)</string>

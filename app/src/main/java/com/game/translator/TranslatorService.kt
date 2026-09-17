@@ -62,6 +62,8 @@ class TranslatorService : Service() {
 
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "translator_service_channel"
+        /** 隐藏浮层后等待干净帧的超时兜底（静止画面无新帧时） */
+        private const val CLEAN_FRAME_TIMEOUT_MS = 250L
 
         @Volatile
         var isRunning: Boolean = false
@@ -674,6 +676,10 @@ class TranslatorService : Service() {
                     DiffEngine.DEFAULT_SAMPLE_INTERVAL_MS
                 }
             }
+            // 稳定消抖窗口：每次进入实时模式时应用最新配置
+            diffEngine.configureDebounce(
+                try { prefs.getInt(MainActivity.KEY_DEBOUNCE_MS, 400).toLong() } catch (e: Exception) { 400L }
+            )
 
             while (isActive && isRealtimeActive.get()) {
                 try {
@@ -689,10 +695,11 @@ class TranslatorService : Service() {
                     // 检测横竖屏旋转动态调整分辨率
                     checkAndResizeCaptureSession()
 
-                    // 光学防污染：截屏前临时隐藏译文浮层，等待合成器输出干净帧后再识别。
-                    // 不再依赖“识别到自己的气泡”启发式，新台词永远不会被旧气泡遮挡吞掉。
-                    // withHiddenForCapture 内部已完成 隐藏→等帧→截图→恢复 的完整时序
-                    val bitmap = overlayManager.withHiddenForCapture {
+                    // 光学防污染：截屏前临时隐藏译文浮层，排空积压帧后事件驱动等待干净帧再识别。
+                    // 不可见时长从固定 120ms+ 压缩到合成器重合成的一两帧，周期闪烁感知大幅降低。
+                    val bitmap = overlayManager.withHiddenForCapture(
+                        awaitFreshFrame = { awaitCleanFrame() }
+                    ) {
                         captureScreen(reuse = true)
                     } ?: continue
 
@@ -721,6 +728,8 @@ class TranslatorService : Service() {
                         ocrLang = ocrLanguage
                     )
 
+                    // 译文布局：每轮读取（旁注/cover 切换无需重启实时模式即可生效）
+                    val layoutMode = prefs.getString(MainActivity.KEY_OVERLAY_LAYOUT, MainActivity.LAYOUT_COVER) ?: MainActivity.LAYOUT_COVER
                     val overlayConfig = OverlayManager.OverlayConfig(
                         minTextLength = minTextLength,
                         bubbleAlphaPercent = bubbleAlpha,
@@ -728,7 +737,8 @@ class TranslatorService : Service() {
                         maxFontSp = fontMaxSp,
                         sourceImageWidth = bitmap.width,
                         sourceImageHeight = bitmap.height,
-                        isRealtimeMode = true
+                        isRealtimeMode = true,
+                        layoutMode = layoutMode
                     )
 
                     // 注册全景文本框包围盒映射，确保后继气泡获取真实物理下边界与防重叠空间
@@ -1127,6 +1137,34 @@ class TranslatorService : Service() {
                 diffEngine.markInFlight(cluster.id, false)
             }
         }
+    }
+
+    /**
+     * 等待"浮层隐藏后合成器输出的第一张干净帧"到达。
+     * 先排空隐藏前积压的旧帧（这些帧仍含浮层），再以监听器等待新帧；
+     * 静止画面可能无新帧，超时 250ms 兜底返回。
+     */
+    private suspend fun awaitCleanFrame(): Boolean {
+        val reader = imageReader ?: return false
+        // 1) 排空隐藏前排出的积压帧（含浮层的旧画面），不留作干净帧候选
+        while (true) {
+            val stale = try { reader.acquireLatestImage() } catch (e: Exception) { null }
+            if (stale == null) break
+            stale.close()
+        }
+        // 2) 事件驱动：等待隐藏后合成器输出的新帧（超时兜底 250ms）
+        withTimeoutOrNull(CLEAN_FRAME_TIMEOUT_MS) {
+            suspendCancellableCoroutine { cont ->
+                reader.setOnImageAvailableListener({ r ->
+                    reader.setOnImageAvailableListener(null, null)
+                    if (cont.isActive) cont.resume(Unit)
+                }, mainHandler)
+                cont.invokeOnCancellation {
+                    reader.setOnImageAvailableListener(null, null)
+                }
+            }
+        }
+        return true
     }
 
     /**

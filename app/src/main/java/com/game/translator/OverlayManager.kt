@@ -35,8 +35,10 @@ class OverlayManager(private val context: Context) {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     companion object {
-        /** 截屏前等待合成器刷新干净帧的时间（毫秒） */
+        /** 截屏前等待合成器刷新干净帧的时间（毫秒）——事件驱动等待的超时兜底 */
         const val FRAME_DRAIN_MS = 120L
+        /** 隐藏事务生效沉降：ViewRootImpl traversal + 一个合成器 vsync 的保守值 */
+        const val POST_HIDE_SETTLE_MS = 32L
     }
 
     data class OverlayConfig(
@@ -46,13 +48,23 @@ class OverlayManager(private val context: Context) {
         val maxFontSp: Int = 16,
         val sourceImageWidth: Int = 0,
         val sourceImageHeight: Int = 0,
-        val isRealtimeMode: Boolean = false
-    )
+        val isRealtimeMode: Boolean = false,
+        /** 译文布局：cover=遮盖原位（默认），note_below=下一行旁注，note_right=右侧旁注 */
+        val layoutMode: String = LAYOUT_COVER
+    ) {
+        companion object {
+            const val LAYOUT_COVER = "cover"
+            const val LAYOUT_NOTE_BELOW = "note_below"
+            const val LAYOUT_NOTE_RIGHT = "note_right"
+        }
+    }
 
     private var rootOverlayView: FrameLayout? = null
     private var isShowing = false
     private var isDismissed = false
     private val bubbleViews = mutableMapOf<Int, TextView>()
+    // cover 占位态：已挂载但译文未完成的气泡 ID（灰显原文，译文完成后恢复常规样式）
+    private val placeholderIds = mutableSetOf<Int>()
 
     private data class BubbleLayoutInfo(
         val id: Int,
@@ -289,6 +301,139 @@ class OverlayManager(private val context: Context) {
         }
     }
 
+    /**
+     * cover 模式占位：译文未到时先以灰显原文占位（布局锚定与译文完全一致，零抖动）。
+     * 旁注模式原文常显，无需占位，直接忽略。
+     */
+    fun showPlaceholder(item: ClusteredText, config: OverlayConfig = currentConfig) {
+        if (config.layoutMode != OverlayConfig.LAYOUT_COVER) return
+        placeholderIds.add(item.id)
+        showOrUpdateBubble(item, config, isFinished = false)
+    }
+
+    /** 占位 ↔ 常规样式的视觉切换（仅调整颜色，不改几何，避免布局抖动） */
+    private fun applyPlaceholderStyle(view: TextView, config: OverlayConfig, isPlaceholder: Boolean) {
+        val alphaInt = ((config.bubbleAlphaPercent.coerceIn(20, 100) / 100f) * 255).toInt()
+        val bg = view.background as? GradientDrawable ?: return
+        if (isPlaceholder) {
+            bg.setColor(Color.argb((alphaInt * 0.45f).toInt(), 0x1E, 0x1E, 0x24))
+            view.setTextColor(Color.argb(210, 0x9E, 0x9E, 0x9E))
+        } else {
+            bg.setColor(Color.argb(alphaInt, 0x1E, 0x1E, 0x24))
+            view.setTextColor(Color.WHITE)
+        }
+    }
+
+    /** 单条端到端几何入口：cover 与 note_below/note_right 三种布局的统一计算。 */
+    private data class BubbleGeometry(
+        val left: Int,
+        val top: Int,
+        val width: Int,
+        val minHeight: Int,
+        val maxHeight: Int,
+        val effectiveMode: String
+    )
+
+    private fun computeBubbleGeometry(item: ClusteredText, config: OverlayConfig): BubbleGeometry? {
+        val screenWidth = currentScreenWidth
+        val screenHeight = currentScreenHeight
+        val density = currentDensity
+        val scaleX = currentScaleX
+        val scaleY = currentScaleY
+        if (screenWidth <= 0 || screenHeight <= 0) return null
+
+        val box = item.boundingBox
+        val scaledLeft = (box.left * scaleX).toInt()
+        val scaledTop = (box.top * scaleY).toInt()
+        val scaledWidth = (box.width() * scaleX).toInt().coerceAtLeast((30 * density).toInt())
+        val scaledHeight = (box.height() * scaleY).toInt().coerceAtLeast((20 * density).toInt())
+
+        val left = scaledLeft.coerceIn(0, (screenWidth - (30 * density).toInt()).coerceAtLeast(0))
+        val top = scaledTop.coerceIn(0, (screenHeight - (20 * density).toInt()).coerceAtLeast(0))
+        val width = scaledWidth.coerceAtMost(screenWidth - left)
+        val originalHeight = scaledHeight.coerceAtMost(screenHeight - top)
+
+        val maxAllowedHeight = maxOf(originalHeight, (originalHeight * 2.4f).toInt(), (48 * density).toInt())
+            .coerceAtMost((screenHeight - top).coerceAtLeast(originalHeight))
+
+        val gapPx = (4f * density).toInt()
+        val minNoteHeight = (20 * density).toInt()
+        val minNoteWidth = (30 * density).toInt()
+
+        // 正下方同一竖向投影重叠的下一个文本簇顶部（cover 高度屏障 / note_below 可用净空）
+        var nextLineTop = screenHeight
+        synchronized(clusterBoundsMap) {
+            for ((_, otherBox) in clusterBoundsMap) {
+                val otherScaledLeft = (otherBox.left * scaleX).toInt()
+                val otherScaledRight = (otherBox.right * scaleX).toInt()
+                val otherScaledTop = (otherBox.top * scaleY).toInt()
+                val hOverlap = maxOf(left, otherScaledLeft) < minOf(left + width, otherScaledRight)
+                if (hOverlap && otherScaledTop > top + (originalHeight / 2) && otherScaledTop < nextLineTop) {
+                    nextLineTop = otherScaledTop
+                }
+            }
+        }
+
+        val requestedMode = when (config.layoutMode) {
+            OverlayConfig.LAYOUT_NOTE_BELOW, OverlayConfig.LAYOUT_NOTE_RIGHT -> config.layoutMode
+            else -> OverlayConfig.LAYOUT_COVER
+        }
+        var effectiveMode = requestedMode
+
+        var geomLeft = left
+        var geomTop = top
+        var geomWidth = width
+        var geomMinHeight = originalHeight
+        var geomMaxHeight = minOf(maxAllowedHeight, (nextLineTop - top - gapPx).coerceAtLeast(originalHeight))
+
+        // 回退链第一级：右侧旁注（右侧净空不足则退到下一行）
+        if (effectiveMode == OverlayConfig.LAYOUT_NOTE_RIGHT) {
+            val noteLeft = (left + width + gapPx).coerceAtMost((screenWidth - minNoteWidth).coerceAtLeast(0))
+            val availRight = screenWidth - noteLeft - (8 * density).toInt()
+            if (availRight >= minNoteWidth) {
+                geomLeft = noteLeft
+                geomWidth = minOf(availRight, (screenWidth * 0.4f).toInt().coerceAtLeast(minNoteWidth))
+            } else {
+                effectiveMode = OverlayConfig.LAYOUT_NOTE_BELOW
+            }
+        }
+        // 回退链第二级：下一行旁注（下方净空不足则退回 cover 遮盖原位）
+        if (effectiveMode == OverlayConfig.LAYOUT_NOTE_BELOW) {
+            val noteTop = top + originalHeight + gapPx
+            val availBelow = nextLineTop - noteTop - gapPx
+            if (availBelow >= minNoteHeight && noteTop + minNoteHeight <= screenHeight) {
+                geomLeft = left
+                geomTop = noteTop
+                geomMinHeight = minOf(originalHeight, minNoteHeight)
+                geomMaxHeight = availBelow
+            } else {
+                effectiveMode = OverlayConfig.LAYOUT_COVER
+            }
+        }
+
+        // 与已存在气泡的碰撞避让（旁注同样受约；跳过自身防止更新路径自推自挤）
+        for ((_, exist) in bubbleDataMap) {
+            if (exist.id == item.id) continue
+            val hOverlap = maxOf(geomLeft, exist.left) < minOf(geomLeft + geomWidth, exist.left + exist.width)
+            if (hOverlap) {
+                if (geomTop >= exist.top) {
+                    val minAllowedTop = exist.top + exist.height + gapPx
+                    if (geomTop < minAllowedTop) {
+                        geomTop = minAllowedTop.coerceAtMost((screenHeight - (20 * density).toInt()).coerceAtLeast(0))
+                    }
+                } else {
+                    val spaceAbove = exist.top - geomTop - gapPx
+                    if (spaceAbove >= geomMinHeight) {
+                        geomMaxHeight = minOf(geomMaxHeight, spaceAbove)
+                    }
+                }
+            }
+        }
+        geomMaxHeight = minOf(geomMaxHeight, (screenHeight - geomTop).coerceAtLeast((20 * density).toInt()))
+        geomMaxHeight = maxOf(geomMaxHeight, geomMinHeight)
+        return BubbleGeometry(geomLeft, geomTop, geomWidth, geomMinHeight, geomMaxHeight, effectiveMode)
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     private fun showOrUpdateBubbleInternal(item: ClusteredText, config: OverlayConfig, isFinished: Boolean) {
         if (isDismissed) {
@@ -326,25 +471,23 @@ class OverlayManager(private val context: Context) {
                 existingView.text = content
                 existingView.scrollTo(0, 0)
             }
-            // 同步检查位置是否有平移变动（针对手操模式或缓存模式下的位置校准）
-            val box = item.boundingBox
-            val scaledLeft = (box.left * currentScaleX).toInt()
-            val scaledTop = (box.top * currentScaleY).toInt()
-            val scaledWidth = (box.width() * currentScaleX).toInt().coerceAtLeast((30 * currentDensity).toInt())
-            val left = scaledLeft.coerceIn(0, (currentScreenWidth - (30 * currentDensity).toInt()).coerceAtLeast(0))
-            val top = scaledTop.coerceIn(0, (currentScreenHeight - (20 * currentDensity).toInt()).coerceAtLeast(0))
-            val width = scaledWidth.coerceAtMost(currentScreenWidth - left)
-            val lp = existingView.layoutParams as? FrameLayout.LayoutParams
-            if (lp != null && (lp.leftMargin != left || lp.topMargin != top || lp.width != width)) {
-                lp.leftMargin = left
-                lp.topMargin = top
-                lp.width = width
-                existingView.layoutParams = lp
-                existingView.requestLayout()
-                bubbleDataMap[item.id]?.let {
-                    it.left = left
-                    it.top = top
-                    it.width = width
+            // 统一几何入口：更新路径同样重算，旁注模式跟随原文重锚定；占位态解除时恢复常规样式
+            val isPlaceholder = placeholderIds.contains(item.id) && !isFinished
+            applyPlaceholderStyle(existingView, config, isPlaceholder = isPlaceholder)
+            if (!isPlaceholder) placeholderIds.remove(item.id)
+            computeBubbleGeometry(item, config)?.let { geom ->
+                val lp = existingView.layoutParams as? FrameLayout.LayoutParams
+                if (lp != null && (lp.leftMargin != geom.left || lp.topMargin != geom.top || lp.width != geom.width)) {
+                    lp.leftMargin = geom.left
+                    lp.topMargin = geom.top
+                    lp.width = geom.width
+                    existingView.layoutParams = lp
+                    existingView.requestLayout()
+                    bubbleDataMap[item.id]?.let {
+                        it.left = geom.left
+                        it.top = geom.top
+                        it.width = geom.width
+                    }
                 }
             }
             return
@@ -353,12 +496,7 @@ class OverlayManager(private val context: Context) {
         // 新建气泡要求有有效内容
         if (content.isBlank()) return
 
-        val screenWidth = currentScreenWidth
-        val screenHeight = currentScreenHeight
         val density = currentDensity
-        val scaleX = currentScaleX
-        val scaleY = currentScaleY
-
         val cornerRadiusPx = 6f * density
         val paddingH = (5f * density).toInt()
         val paddingV = (2.5f * density).toInt()
@@ -370,61 +508,11 @@ class OverlayManager(private val context: Context) {
         val maxSp = config.maxFontSp.coerceAtLeast(minSp)
         val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
-        val box = item.boundingBox
-        val scaledLeft = (box.left * scaleX).toInt()
-        val scaledTop = (box.top * scaleY).toInt()
-        val scaledWidth = (box.width() * scaleX).toInt().coerceAtLeast((30 * density).toInt())
-        val scaledHeight = (box.height() * scaleY).toInt().coerceAtLeast((20 * density).toInt())
-
-        val left = scaledLeft.coerceIn(0, (screenWidth - (30 * density).toInt()).coerceAtLeast(0))
-        val top = scaledTop.coerceIn(0, (screenHeight - (20 * density).toInt()).coerceAtLeast(0))
-        val width = scaledWidth.coerceAtMost(screenWidth - left)
-        val originalHeight = scaledHeight.coerceAtMost(screenHeight - top)
-
-        val maxAllowedHeight = maxOf(originalHeight, (originalHeight * 2.4f).toInt(), (48 * density).toInt())
-            .coerceAtMost((screenHeight - top).coerceAtLeast(originalHeight))
-
-        // 核心几何屏障：查找正下方同一竖向投影重叠的下一个文本簇，严格限制高度不得跨越下溢到下一行！
-        var nextLineTop = screenHeight
-        val gapPx = (4f * density).toInt()
-        synchronized(clusterBoundsMap) {
-            for ((otherId, otherBox) in clusterBoundsMap) {
-                if (otherId == item.id) continue
-                val otherScaledLeft = (otherBox.left * scaleX).toInt()
-                val otherScaledRight = (otherBox.right * scaleX).toInt()
-                val otherScaledTop = (otherBox.top * scaleY).toInt()
-
-                val hOverlap = maxOf(left, otherScaledLeft) < minOf(left + width, otherScaledRight)
-                if (hOverlap && otherScaledTop > top + (originalHeight / 2)) {
-                    if (otherScaledTop < nextLineTop) {
-                        nextLineTop = otherScaledTop
-                    }
-                }
-            }
-        }
-        val spaceToNextLine = (nextLineTop - top - gapPx).coerceAtLeast(originalHeight)
-        var finalMaxHeight = minOf(maxAllowedHeight, spaceToNextLine)
-        var finalTop = top
-
-        for ((_, exist) in bubbleDataMap) {
-            val hOverlap = maxOf(left, exist.left) < minOf(left + width, exist.left + exist.width)
-            if (hOverlap) {
-                if (finalTop >= exist.top) {
-                    val minAllowedTop = exist.top + exist.height + gapPx
-                    if (finalTop < minAllowedTop) {
-                        finalTop = minAllowedTop.coerceAtMost((screenHeight - (20 * density).toInt()).coerceAtLeast(0))
-                    }
-                } else {
-                    val spaceAbove = exist.top - finalTop - gapPx
-                    if (spaceAbove >= originalHeight) {
-                        finalMaxHeight = minOf(finalMaxHeight, spaceAbove)
-                    }
-                }
-            }
-        }
-        val remainingToNextLine = (nextLineTop - finalTop - gapPx).coerceAtLeast(originalHeight)
-        finalMaxHeight = minOf(finalMaxHeight, remainingToNextLine)
-        finalMaxHeight = minOf(finalMaxHeight, (screenHeight - finalTop).coerceAtLeast((20 * density).toInt()))
+        // 统一几何入口：cover 与旁注布局在此分叉，含回退链与碰撞避让
+        val geometry = computeBubbleGeometry(item, config) ?: return
+        val finalLeft = geometry.left
+        val finalTop = geometry.top
+        val finalWidth = geometry.width
 
         val bubbleView = TextView(context).apply {
             val bgDrawable = GradientDrawable().apply {
@@ -438,8 +526,8 @@ class OverlayManager(private val context: Context) {
             setLineSpacing(0f, 1.05f)
             gravity = Gravity.TOP or Gravity.START
 
-            minHeight = originalHeight
-            maxHeight = finalMaxHeight
+            minHeight = geometry.minHeight
+            maxHeight = geometry.maxHeight
 
             // 开启垂直平滑滚动
             movementMethod = ScrollingMovementMethod.getInstance()
@@ -520,15 +608,19 @@ class OverlayManager(private val context: Context) {
             }
         }
 
-        val childParams = FrameLayout.LayoutParams(width, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+        val childParams = FrameLayout.LayoutParams(finalWidth, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
             gravity = Gravity.TOP or Gravity.START
-            leftMargin = left
+            leftMargin = finalLeft
             topMargin = finalTop
         }
 
         rootView.addView(bubbleView, childParams)
         bubbleViews[item.id] = bubbleView
-        bubbleDataMap[item.id] = BubbleLayoutInfo(item.id, left, finalTop, width, originalHeight)
+        bubbleDataMap[item.id] = BubbleLayoutInfo(item.id, finalLeft, finalTop, finalWidth, geometry.minHeight)
+        // cover 占位态：新建时即以灰显样式挂载（旁注模式与缓存命中路径不在占位集合中）
+        if (placeholderIds.contains(item.id)) {
+            applyPlaceholderStyle(bubbleView, config, isPlaceholder = true)
+        }
         // 动态监听实际测量渲染高度，实时回填真实占位高度，确保后排气泡获得真实物理上边界
         bubbleView.addOnLayoutChangeListener { _, _, topPos, _, bottomPos, _, _, _, _ ->
             val actualHeight = bottomPos - topPos
@@ -586,32 +678,25 @@ class OverlayManager(private val context: Context) {
             }
         }
 
-        // 2. 原地平移滚动气泡 (moved)：更新 LayoutParams 并触发布局，平滑跟随网页/条漫滚动
+        // 2. 原地平移滚动气泡 (moved)：统一几何入口重算（旁注模式随原文重锚定），平滑跟随滚动
         for (item in diffResult.moved) {
             val existing = bubbleViews[item.id]
-            val box = item.boundingBox
-            val scaledLeft = (box.left * currentScaleX).toInt()
-            val scaledTop = (box.top * currentScaleY).toInt()
-            val scaledWidth = (box.width() * currentScaleX).toInt().coerceAtLeast((30 * currentDensity).toInt())
-            val left = scaledLeft.coerceIn(0, (currentScreenWidth - (30 * currentDensity).toInt()).coerceAtLeast(0))
-            val top = scaledTop.coerceIn(0, (currentScreenHeight - (20 * currentDensity).toInt()).coerceAtLeast(0))
-            val width = scaledWidth.coerceAtMost(currentScreenWidth - left)
-
-            if (existing != null) {
+            val geom = computeBubbleGeometry(item, config)
+            if (existing != null && geom != null) {
                 val lp = existing.layoutParams as? FrameLayout.LayoutParams
-                if (lp != null && (lp.leftMargin != left || lp.topMargin != top || lp.width != width)) {
-                    lp.leftMargin = left
-                    lp.topMargin = top
-                    lp.width = width
+                if (lp != null && (lp.leftMargin != geom.left || lp.topMargin != geom.top || lp.width != geom.width)) {
+                    lp.leftMargin = geom.left
+                    lp.topMargin = geom.top
+                    lp.width = geom.width
                     existing.layoutParams = lp
                     existing.requestLayout()
                 }
                 bubbleDataMap[item.id]?.let {
-                    it.left = left
-                    it.top = top
-                    it.width = width
+                    it.left = geom.left
+                    it.top = geom.top
+                    it.width = geom.width
                 }
-            } else {
+            } else if (geom != null) {
                 showOrUpdateBubbleInternal(item, config, isFinished = true)
             }
         }
@@ -626,6 +711,10 @@ class OverlayManager(private val context: Context) {
             if (existing != null) {
                 if (item.translatedText != null && existing.text != item.translatedText) {
                     existing.text = item.translatedText
+                }
+                // 译文到达：解除 cover 占位灰显
+                if (item.translatedText != null && placeholderIds.remove(item.id)) {
+                    applyPlaceholderStyle(existing, config, isPlaceholder = false)
                 }
             } else {
                 // 若此前气泡尚未创建，走新建路径
@@ -646,6 +735,16 @@ class OverlayManager(private val context: Context) {
         for (item in diffResult.unchanged) {
             if (!bubbleViews.containsKey(item.id) && item.translatedText != null) {
                 showOrUpdateBubbleInternal(item, config, isFinished = true)
+            }
+        }
+
+        // cover 占位：新挂载且尚无译文的簇以灰显原文占位（旁注模式无需占位）
+        if (config.layoutMode == OverlayConfig.LAYOUT_COVER) {
+            for (item in diffResult.needModelTranslation) {
+                if (!bubbleViews.containsKey(item.id) && !placeholderIds.contains(item.id)) {
+                    placeholderIds.add(item.id)
+                    showOrUpdateBubbleInternal(item.copy(translatedText = null), config, isFinished = false)
+                }
             }
         }
     }
@@ -677,6 +776,7 @@ class OverlayManager(private val context: Context) {
      */
     private fun dismissInternal() {
         isDismissed = true
+        placeholderIds.clear()
         if (isShowing && rootOverlayView != null) {
             try {
                 windowManager.removeView(rootOverlayView)
@@ -694,16 +794,25 @@ class OverlayManager(private val context: Context) {
     }
 
     /**
-     * 截屏期间临时隐藏译文浮层：隐藏 → 等待合成器输出干净帧 → 执行截图 → 恢复。
+     * 截屏期间临时隐藏译文浮层：隐藏 → 排空积压帧 → 等待隐藏后的新干净帧 → 执行截图 → 恢复。
      * 恢复位于 finally，任何异常/取消路径都不会留下永久隐藏的浮层。
+     *
+     * 相比固定延时，事件驱动只等"合成器重合成后的第一帧"，浮层不可见时长从 ~120ms+ 压缩到
+     * 通常一两帧（约 16-40ms），周期性闪烁感知大幅降低。
+     * @param awaitFreshFrame 截图前由服务注入的"等待干净帧"挂起函数（返回 false 表示超时，用兜底延时结果）
      */
-    suspend fun withHiddenForCapture(block: suspend () -> Bitmap?): Bitmap? {
+    suspend fun withHiddenForCapture(
+        awaitFreshFrame: suspend () -> Boolean = { delay(FRAME_DRAIN_MS); true },
+        block: suspend () -> Bitmap?
+    ): Bitmap? {
         val root = rootOverlayView
         if (root != null && isShowing) {
             withContext(Dispatchers.Main) { root.visibility = View.INVISIBLE }
             try {
-                // 合成器至少需要一帧才会产出不含浮层的新画面
-                delay(FRAME_DRAIN_MS)
+                // 给 ViewRootImpl traversal + SurfaceFlinger 事务生效留一帧时间，
+                // 否则紧随其后的排空可能漏掉隐藏事务生效前的最后一帧
+                delay(POST_HIDE_SETTLE_MS)
+                awaitFreshFrame()
                 return block()
             } finally {
                 // NonCancellable：协程取消时也必须恢复浮层可见，否则永久黑屏
