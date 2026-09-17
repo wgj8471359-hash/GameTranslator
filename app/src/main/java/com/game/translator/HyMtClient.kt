@@ -329,8 +329,8 @@ class HyMtClient {
 
                         if (!response.isSuccessful) {
                             response.close()
-                            item.translatedText = item.originalText
-                            onProgress(item.id, item.originalText, true)
+                            // 失败不再伪装成功：置空译文让上层进入失败退避
+                            item.translatedText = null
                             return@withPermit
                         }
 
@@ -378,14 +378,19 @@ class HyMtClient {
                                 .trim()
                         }
 
-                        val textToDisplay = if (finalClean.isNotBlank()) finalClean else item.originalText
-                        item.translatedText = textToDisplay
-                        onProgress(item.id, textToDisplay, true)
+                        val textToDisplay = finalClean
+                        if (textToDisplay.isNotBlank()) {
+                            item.translatedText = textToDisplay
+                            onProgress(item.id, textToDisplay, true)
+                        } else {
+                            // 空响应不伪装成原文成功，交给上层失败退避
+                            item.translatedText = null
+                        }
 
                     } catch (e: Exception) {
                         if (coroutineContext.isActive && e.message?.contains("Canceled", ignoreCase = true) != true) {
-                            item.translatedText = item.originalText
-                            onProgress(item.id, item.originalText, true)
+                            // 失败不再伪装成功：置空译文让上层进入失败退避
+                            item.translatedText = null
                         }
                     } finally {
                         activeCalls.remove(call)

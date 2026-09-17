@@ -2,6 +2,7 @@ package com.game.translator
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -22,12 +23,21 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.core.widget.TextViewCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 class OverlayManager(private val context: Context) {
 
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    companion object {
+        /** 截屏前等待合成器刷新干净帧的时间（毫秒） */
+        const val FRAME_DRAIN_MS = 120L
+    }
 
     data class OverlayConfig(
         val minTextLength: Int = 2,
@@ -256,11 +266,20 @@ class OverlayManager(private val context: Context) {
     }
 
     /**
-     * 单个气泡实时呈现或流式增量刷新（逐句呈现模式）
+     * 单个气泡实时呈现或流式增量刷新（逐句呈现模式）。
+     * @param preShowCheck 在 UI 线程实际执行渲染前再次校验；返回 false 时丢弃本次展示，
+     *        用于防止异步回调排队期间轨迹失效/会话切换后旧结果重新上屏。
      */
     @SuppressLint("ClickableViewAccessibility")
-    fun showOrUpdateBubble(item: ClusteredText, config: OverlayConfig = currentConfig, isFinished: Boolean = false) {
+    fun showOrUpdateBubble(
+        item: ClusteredText,
+        config: OverlayConfig = currentConfig,
+        isFinished: Boolean = false,
+        preShowCheck: (() -> Boolean)? = null
+    ) {
         val action = Runnable {
+            // preShowCheck 仅在显式传入时生效；null 表示调用方未要求执行时守卫
+            if (preShowCheck != null && preShowCheck.invoke() != true) return@Runnable
             showOrUpdateBubbleInternal(item, config, isFinished)
         }
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -273,8 +292,10 @@ class OverlayManager(private val context: Context) {
     @SuppressLint("ClickableViewAccessibility")
     private fun showOrUpdateBubbleInternal(item: ClusteredText, config: OverlayConfig, isFinished: Boolean) {
         if (isDismissed) {
-            // 用户已关闭气泡，直接丢弃后续流式吐字，绝不重新弹出遮挡新画面
-            return
+            // 实时模式：dismiss 只来自服务侧生命周期（切换/旋转/清屏），干净帧管线会随后重建浮层，
+            // 因此不允许 dismissed 状态永久吞掉首个译文；手动模式仍保持"用户关闭后不再弹出"
+            if (!config.isRealtimeMode) return
+            isDismissed = false
         }
         if (!isShowing || rootOverlayView == null) {
             prepareOverlayInternal(config)
@@ -670,6 +691,26 @@ class OverlayManager(private val context: Context) {
             clusterBoundsMap.clear()
         }
         isShowing = false
+    }
+
+    /**
+     * 截屏期间临时隐藏译文浮层：隐藏 → 等待合成器输出干净帧 → 执行截图 → 恢复。
+     * 恢复位于 finally，任何异常/取消路径都不会留下永久隐藏的浮层。
+     */
+    suspend fun withHiddenForCapture(block: suspend () -> Bitmap?): Bitmap? {
+        val root = rootOverlayView
+        if (root != null && isShowing) {
+            withContext(Dispatchers.Main) { root.visibility = View.INVISIBLE }
+            try {
+                // 合成器至少需要一帧才会产出不含浮层的新画面
+                delay(FRAME_DRAIN_MS)
+                return block()
+            } finally {
+                // NonCancellable：协程取消时也必须恢复浮层可见，否则永久黑屏
+                withContext(NonCancellable + Dispatchers.Main) { root.visibility = View.VISIBLE }
+            }
+        }
+        return block()
     }
 
     /**

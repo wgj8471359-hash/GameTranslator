@@ -87,6 +87,8 @@ class TranslatorService : Service() {
     private val isRealtimeActive = AtomicBoolean(false)
     private var isRealtimePassthrough = true
     private var realtimeJob: Job? = null
+    // 会话内所有在途翻译请求的共享作用域：关闭实时模式时整树取消，句柄不会被后一批覆盖
+    private var realtimeRequestScope: CoroutineScope? = null
     private var longPressRunnable: Runnable? = null
     private var isLongPressTriggered = false
 
@@ -618,6 +620,11 @@ class TranslatorService : Service() {
             cancelTranslation(notifyUser = false)
             inFlightRealtimeClusterIds.clear()
             isRealtimePassthrough = true
+            // 请求作用域挂在 serviceScope 之下（附接父 Job），服务销毁与本会话停止都能整树取消
+            realtimeRequestScope?.cancel()
+            realtimeRequestScope = CoroutineScope(
+                serviceScope.coroutineContext + SupervisorJob(serviceScope.coroutineContext[Job])
+            )
             // 视觉反馈：悬浮球着色标明进入实时监听态（默认沉浸穿透）
             floatingBallView?.setColorFilter(android.graphics.Color.parseColor("#6366F1"))
             Toast.makeText(this, "已开启实时翻译【沉浸穿透态】：可正常滑动网页与操作游戏", Toast.LENGTH_SHORT).show()
@@ -632,6 +639,8 @@ class TranslatorService : Service() {
         if (isRealtimeActive.compareAndSet(true, false)) {
             currentEpoch.incrementAndGet()
             inFlightRealtimeClusterIds.clear()
+            realtimeRequestScope?.cancel()
+            realtimeRequestScope = null
             realtimeJob?.cancel()
             realtimeJob = null
             diffEngine.reset()
@@ -680,8 +689,12 @@ class TranslatorService : Service() {
                     // 检测横竖屏旋转动态调整分辨率
                     checkAndResizeCaptureSession()
 
-                    // 静默复用缓冲区抓帧
-                    val bitmap = captureScreen(reuse = true) ?: continue
+                    // 光学防污染：截屏前临时隐藏译文浮层，等待合成器输出干净帧后再识别。
+                    // 不再依赖“识别到自己的气泡”启发式，新台词永远不会被旧气泡遮挡吞掉。
+                    // withHiddenForCapture 内部已完成 隐藏→等帧→截图→恢复 的完整时序
+                    val bitmap = overlayManager.withHiddenForCapture {
+                        captureScreen(reuse = true)
+                    } ?: continue
 
                     val lineGapRatio = prefs.getFloat(MainActivity.KEY_LINE_GAP_RATIO, 1.2f)
                     val minTextLength = prefs.getInt(MainActivity.KEY_MIN_TEXT_LENGTH, 2)
@@ -702,13 +715,10 @@ class TranslatorService : Service() {
                         density = density
                     )
 
-                    val activeBubbleRects = overlayManager.getVisibleBubbleImageRects()
-
-                    // 核心差分计算：空间 IoU 匹配、相似度比对、打字机消抖、光学隔离与 LRU 缓存匹配
+                    // 核心差分计算：内容精确匹配 + 就近几何消歧；输入保证为干净截图
                     val diffResult = diffEngine.processFrame(
                         currentClusters = clusters,
-                        ocrLang = ocrLanguage,
-                        activeBubbleRects = activeBubbleRects
+                        ocrLang = ocrLanguage
                     )
 
                     val overlayConfig = OverlayManager.OverlayConfig(
@@ -729,7 +739,7 @@ class TranslatorService : Service() {
                         overlayManager.applyDiffResult(diffResult, overlayConfig)
                     }
 
-                    // 增量请求大模型（仅处理未命中缓存、处于活跃追踪且未在请求中的稳定文本）
+                    // 增量请求大模型（仅处理未命中缓存、未在请求中、已过消抖窗口且未被失败退避抑制的稳定文本）
                     val toTranslate = diffResult.needModelTranslation.filter {
                         !inFlightRealtimeClusterIds.contains(it.id) && diffEngine.isClusterActive(it.id)
                     }
@@ -741,27 +751,21 @@ class TranslatorService : Service() {
                             diffEngine.markInFlight(item.id, true)
                         }
                         val translationConfig = getTranslationConfig(prefs)
-                        val streamMode = translationConfig.streamMode
                         val requestEpoch = currentEpoch.get()
-
-                        // 核心并发解耦：大模型网络请求异步派发，绝不阻塞当前帧循环！
-                        // 确保手指持续滑动网页或操作游戏时，当前循环保持 1.2s 频率即时计算 moved 并平滑跟手！
-                        serviceScope.launch {
+                        // 请求纳入会话任务树，stopRealtimeMode 可整树取消
+                        realtimeRequestScope?.launch {
                             try {
                                 val result = hyMtClient.translateStream(toTranslate, translationConfig) { clusterId, text, isFinished ->
                                     if (requestEpoch != currentEpoch.get() || !isRealtimeActive.get()) return@translateStream
-                                    if (!diffEngine.isClusterActive(clusterId)) return@translateStream
-                                    val target = toTranslate.find { it.id == clusterId }
-                                    if (target != null) {
+                                    // 版本校验：仅当该 ID 仍对应同一原文时才写回，杜绝旧结果污染新画面
+                                    val originalText = toTranslate.find { it.id == clusterId }?.originalText ?: return@translateStream
+                                    val target = diffEngine.getActiveCluster(clusterId, originalText) ?: return@translateStream
+                                    if (isFinished) {
                                         target.translatedText = text
-                                        // 核心修复：实时模式下绝不把未成句的半截文字推上屏，杜绝下一帧 OCR 捕获碎片文字引发的撕裂和闪烁！
-                                        // 仅当整句生成完毕（isFinished == true）时原子性上屏呈现并写回缓存
-                                        if (isFinished) {
-                                            overlayManager.showOrUpdateBubble(target, overlayConfig, isFinished = true)
-                                            diffEngine.putCache(ocrLanguage, target.originalText, text, clusterId)
-                                            diffEngine.markInFlight(clusterId, false)
-                                            inFlightRealtimeClusterIds.remove(clusterId)
-                                        }
+                                        overlayManager.showOrUpdateBubble(target, overlayConfig, isFinished = true, preShowCheck = {
+                                            diffEngine.getActiveCluster(target.id, target.originalText) != null
+                                        })
+                                        diffEngine.putCache(ocrLanguage, target.originalText, text, clusterId)
                                     }
                                 }
 
@@ -769,11 +773,26 @@ class TranslatorService : Service() {
                                     if (requestEpoch != currentEpoch.get() || !isRealtimeActive.get()) return@onSuccess
                                     for (item in translatedList) {
                                         if (item.translatedText != null) {
-                                            diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!, item.id)
-                                            if (diffEngine.isClusterActive(item.id)) {
-                                                overlayManager.showOrUpdateBubble(item, overlayConfig, isFinished = true)
+                                            // 上屏前用最新坐标重建条目，迟到结果不回跳到请求时坐标
+                                            val current = diffEngine.getActiveCluster(item.id, item.originalText)
+                                            if (current != null) {
+                                                current.translatedText = item.translatedText
+                                                overlayManager.showOrUpdateBubble(current, overlayConfig, isFinished = true, preShowCheck = {
+                                                    diffEngine.getActiveCluster(item.id, item.originalText) != null
+                                                })
+                                                diffEngine.putCache(ocrLanguage, current.originalText, item.translatedText!!, item.id)
+                                            } else {
+                                                // 轨迹已离屏：结果仅入缓存，失败计数不累积
+                                                diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!, item.id)
                                             }
+                                        } else {
+                                            // 网络层未给出有效译文（HTTP 错误/异常/空响应）：进入失败退避
+                                            diffEngine.markFailed(item.id)
                                         }
+                                    }
+                                }.onFailure {
+                                    for (item in toTranslate) {
+                                        diffEngine.markFailed(item.id)
                                     }
                                 }
                             } finally {
@@ -1052,6 +1071,8 @@ class TranslatorService : Service() {
      * 3. 独立调用大模型单句翻译并流式写回更新气泡与缓存。
      */
     private fun handleBubbleRetranslate(cluster: ClusteredText) {
+        // 会话守卫：捕获启动时的 epoch，期间发生 停止/重开/旋转 时迟到结果全部丢弃
+        val startEpoch = currentEpoch.get()
         serviceScope.launch {
             val prefs = MainActivity.getPrefs(this@TranslatorService)
             val ocrLanguage = prefs.getString(MainActivity.KEY_OCR_LANGUAGE, OcrHelper.LANG_AUTO) ?: OcrHelper.LANG_AUTO
@@ -1063,28 +1084,47 @@ class TranslatorService : Service() {
             // 2. 占位刷新
             val config = getTranslationConfig(prefs)
             val overlayConfig = overlayManager.currentOverlayConfig
-
             cluster.translatedText = "正在重新翻译..."
             overlayManager.showOrUpdateBubble(cluster, overlayConfig, isFinished = false)
+            diffEngine.markInFlight(cluster.id, true)
 
-            // 3. 单句重新调用大模型
-            val singleResult = hyMtClient.translateStream(listOf(cluster), config) { _, partialText, isFinished ->
-                cluster.translatedText = partialText
-                overlayManager.showOrUpdateBubble(cluster, overlayConfig, isFinished)
-                if (isFinished) {
-                    diffEngine.putCache(ocrLanguage, cluster.originalText, partialText, cluster.id)
-                }
-            }
-
-            singleResult.onSuccess { list ->
-                for (item in list) {
-                    if (item.translatedText != null) {
-                        diffEngine.putCache(ocrLanguage, item.originalText, item.translatedText!!, item.id)
-                        overlayManager.showOrUpdateBubble(item, overlayConfig, isFinished = true)
+            try {
+                // 3. 单句重新调用大模型；写回前逐次校验 内容版本 + 会话代次
+                val singleResult = hyMtClient.translateStream(listOf(cluster), config) { _, partialText, isFinished ->
+                    if (startEpoch != currentEpoch.get()) return@translateStream
+                    val current = diffEngine.getActiveCluster(cluster.id, cluster.originalText) ?: return@translateStream
+                    if (isFinished) {
+                        current.translatedText = partialText
+                        overlayManager.showOrUpdateBubble(current, overlayConfig, isFinished = true, preShowCheck = {
+                            diffEngine.getActiveCluster(current.id, current.originalText) != null
+                        })
+                        diffEngine.putCache(ocrLanguage, current.originalText, partialText, current.id)
                     }
                 }
-            }.onFailure { error ->
-                Toast.makeText(this@TranslatorService, "重译失败: ${error.localizedMessage ?: "网络异常"}", Toast.LENGTH_SHORT).show()
+
+                singleResult.onSuccess { list ->
+                    if (startEpoch != currentEpoch.get()) return@onSuccess
+                    for (item in list) {
+                        if (item.translatedText == null) {
+                            // Form B 失败时返回 success + 空译文：按失败处理并提示
+                            diffEngine.markFailed(item.id)
+                            Toast.makeText(this@TranslatorService, "重译失败: 模型未返回有效译文", Toast.LENGTH_SHORT).show()
+                            continue
+                        }
+                        // 手动模式的气泡可能没有对应实时轨迹；此时跳过轨迹校验，仅要求会话一致
+                        val current = diffEngine.getActiveCluster(item.id, item.originalText) ?: item
+                        current.translatedText = item.translatedText
+                        overlayManager.showOrUpdateBubble(current, overlayConfig, isFinished = true, preShowCheck = {
+                            diffEngine.getActiveCluster(current.id, current.originalText) != null || !isRealtimeActive.get()
+                        })
+                        diffEngine.putCache(ocrLanguage, current.originalText, item.translatedText!!, current.id)
+                    }
+                }.onFailure {
+                    diffEngine.markFailed(cluster.id)
+                    Toast.makeText(this@TranslatorService, "重译失败: ${it.localizedMessage ?: "网络异常"}", Toast.LENGTH_SHORT).show()
+                }
+            } finally {
+                diffEngine.markInFlight(cluster.id, false)
             }
         }
     }
